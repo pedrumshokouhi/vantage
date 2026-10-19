@@ -1,0 +1,4 @@
+private/
+*.pyc
+__pycache__/
+.devdata/

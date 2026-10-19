@@ -1,0 +1,12 @@
+data/
+vendor/
+__pycache__/
+*.pyc
+.DS_Store
+cloud/private/
+cloud/.devdata/
+*.db
+*.db-shm
+*.db-wal
+setup-code.txt
+.cf_token
