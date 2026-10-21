@@ -5,6 +5,20 @@ A private, single-user website that answers, every time you sign in:
 
 Runs entirely on your Mac. Python 3 standard library + SQLite. No build step, no dependencies, no cloud account.
 
+<p align="center">
+  <img src="docs/screenshots/today.jpg" alt="Today: the morning briefing explained in five labelled parts, next to the portfolio and the agenda" width="100%">
+</p>
+<p align="center">
+  <img src="docs/screenshots/briefing.jpg" alt="Briefing: macro translated into prime rate, real rate and purchasing power, then every story in five labelled parts" width="49%">
+  <img src="docs/screenshots/portfolio.jpg" alt="Portfolio: performance against a blended benchmark with the currency effect split out, concentration by sector, currency mix" width="49%">
+</p>
+<p align="center">
+  <img src="docs/screenshots/scenario-lab.jpg" alt="Scenario lab: rates, inflation, oil, CAD and growth shocks with the estimated effect shown as a range and the most sensitive positions" width="49%">
+  <img src="docs/screenshots/network.jpg" alt="Network: a force-directed map with you at the centre, promises you made, milestones, and reasons to reconnect" width="49%">
+</p>
+
+The screens above are the DEMO workspace: fictional holdings, people and events; the prices, news and filings in them are live.
+
 ## Start it
 
 Double-click **`Start Vantage.command`** (or run `python3 vantage.py`) and open <http://localhost:8790>.
