@@ -187,7 +187,9 @@ def analyze_story(space, s, port):
         parts["mine"] = {"label": "calculated", "items": [{"ticker": t, "tilt": sc, "weight": w} for t, sc, w in hits[:5]],
                          "text": "No holdings with a meaningful sensitivity to this development." if not hits else ""}
     else:
-        parts["matters"] = {"label": "interpretation", "text": "No known economic transmission pattern detected in this story. It may matter for reasons the built-in model does not cover; ask Claude for a deeper read."}
+        parts["matters"] = {"label": "interpretation",
+                            "text": "No known economic transmission pattern detected in this story. "
+                                    "It may matter for reasons the built-in model does not cover; ask Claude for a deeper read."}
         parts["mine"] = {"label": "calculated", "items": [], "text": "No mapped driver exposure."}
     direct = [m for m in s.get("mentions", []) if m["kind"] in ("holding", "watch", "org")]
     if direct:
@@ -220,12 +222,15 @@ def macro(space):
     if policy:
         prime = policy["value"] + 2.2
         practical.append({"label": "calculated", "title": "Borrowing: Canadian prime rate is about %.2f%%" % prime,
-                          "text": "Big-bank prime has sat 2.20 points above the BoC target rate since 2022. A $500k variable mortgage at prime minus 0.5 costs about $%s/month in interest alone." % format(round(500000 * (prime - .5) / 100 / 12), ","),
+                          "text": "Big-bank prime has sat 2.20 points above the BoC target rate since 2022. "
+                                  "A $500k variable mortgage at prime minus 0.5 costs about $%s/month in interest alone." % format(round(500000 * (prime - .5) / 100 / 12), ","),
                           "src": "Bank of Canada Valet (%s)" % policy["date"]})
     if cpi and policy:
         real = policy["value"] - cpi["value"]
         practical.append({"label": "calculated", "title": "Real policy rate: %+.2f%%" % real,
-                          "text": "Policy rate minus headline inflation. %s" % ("Positive means cash savings roughly keep pace with prices; the policy stance is restrictive." if real > 0 else "Negative means cash loses purchasing power; policy is still supportive."),
+                          "text": "Policy rate minus headline inflation. %s" % (
+                              "Positive means cash savings roughly keep pace with prices; the policy stance is restrictive." if real > 0
+                              else "Negative means cash loses purchasing power; policy is still supportive."),
                           "src": "BoC target %.2f%% (%s), CPI %.1f%% y/y (%s)" % (policy["value"], policy["date"], cpi["value"], cpi["date"])})
     if usdcad:
         practical.append({"label": "calculated", "title": "Purchasing power: US$100 costs C$%.2f" % (100 * usdcad["value"]),

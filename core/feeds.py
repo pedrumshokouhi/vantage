@@ -115,7 +115,8 @@ FEEDS = [
 
 TOPIC_RULES = [
     ("conflict", r"\b(war|missile|strike[sd]?|airstrike|troops|invasion|ceasefire|drone attack|shelling|militants?|hostages?|military|gaza|ukraine|israel|iran|hezbollah|houthi|nato)\b"),
-    ("macro", r"\b(inflation|cpi|interest rates?|rate cut|rate hike|central bank|federal reserve|fed\b|bank of canada|gdp|unemployment|jobs report|payrolls|recession|treasury yields?|bond yields?|tariffs?|economy)\b"),
+    ("macro", r"\b(inflation|cpi|interest rates?|rate cut|rate hike|central bank|federal reserve|fed\b|bank of canada|gdp|unemployment|"
+              r"jobs report|payrolls|recession|treasury yields?|bond yields?|tariffs?|economy)\b"),
     ("markets", r"\b(stocks?|shares|s&p|nasdaq|dow|tsx|earnings|ipo|investors?|oil prices?|bitcoin|crypto|bonds?|dollar|yen|euro|gold)\b"),
     ("technology", r"\b(ai|artificial intelligence|openai|anthropic|nvidia|chips?|semiconductors?|apple|google|microsoft|meta|software|cyber|data cent(er|re)s?|robot|quantum)\b"),
     ("geopolitics", r"\b(election|president|prime minister|sanctions?|diplomat|summit|china|russia|taiwan|eu\b|parliament|minister)\b"),

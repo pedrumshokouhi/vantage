@@ -79,7 +79,9 @@ PBKDF2-SHA256 (600k) passwords Â· 256-bit session tokens stored only as hashes Â
 
 ```
 vantage.py            entry point (--host, --port, --data, --reset-password)
-core/server.py        HTTP server, routes, background refresher
+core/server.py        HTTP server: request handling, sessions, CSRF checks
+core/api/             JSON routes, one module per area (account, portfolio, calendar, records, ...)
+core/jobs.py          background refresher (quotes, feeds, calendars, filings)
 core/auth.py          passwords, sessions, TOTP, lockouts
 core/db.py            SQLite, records + append-only revisions, cache, backups
 core/feeds.py         RSS, quotes, Bank of Canada, SEC EDGAR, ICS
@@ -90,6 +92,7 @@ core/cos.py           chief-of-staff retrieval
 core/ai.py            optional Claude layer
 static/               single-page app (vanilla JS, hand-built SVG/canvas charts)
 tests/                backend tests (standard library only)
+cloud/worker/         Cloudflare Worker: worker.js entry, lib/store/upstream/jobs modules, routes/
 cloud/tests/          Cloudflare Worker tests (Node 22+, in-memory SQLite stand-in for D1)
 data/                 your database, backups (git-ignored)
 ```
@@ -99,6 +102,7 @@ data/                 your database, backups (git-ignored)
 ```
 python3 -m unittest discover -s tests          # local server: auth, records, calendar parsing, HTTP API
 node --test cloud/tests/worker.test.mjs        # Cloudflare Worker: auth, records, decision lock, MFA
+ruff check .                                   # lint (config in ruff.toml)
 ```
 
 Both run offline against throwaway databases, and run on every push via GitHub Actions.
