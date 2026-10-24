@@ -26,7 +26,6 @@ sys.path.insert(0, ROOT)
 
 from core import auth, db, engine, feeds, intel, server  # noqa: E402
 
-
 _urlopen = feeds.urllib.request.urlopen
 
 
