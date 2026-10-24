@@ -145,11 +145,17 @@ async function totpAt(secretB32, counter) {
   const code = ((mac[o] & 127) << 24 | mac[o + 1] << 16 | mac[o + 2] << 8 | mac[o + 3]) % 1e6;
   return String(code).padStart(6, "0");
 }
-async function verifyTotp(secretB32, code) {
+// An accepted code burns its time step (and every earlier one), so a code that was seen once can't be replayed.
+async function verifyTotp(env, secretB32, code) {
   code = String(code || "").replace(/\D/g, "");
   if (code.length !== 6 || !secretB32) return false;
   const step = Math.floor(now() / 30);
-  for (const d of [-1, 0, 1]) if (safeEq(await totpAt(secretB32, step + d), code)) return true;
+  for (const d of [-1, 0, 1]) {
+    if (!safeEq(await totpAt(secretB32, step + d), code)) continue;
+    if (step + d <= (await kvGet(env, "totp_last_step", 0))) return false;
+    await kvSet(env, "totp_last_step", step + d);
+    return true;
+  }
   return false;
 }
 
@@ -707,7 +713,7 @@ route("POST", "/api/setup", async (c) => {
 
 route("POST", "/api/login", async (c) => {
   const d = await c.body();
-  const username = String(d.username || "").trim().toLowerCase();
+  const username = String(d.username || "").trim().toLowerCase().slice(0, 64); // also the key failed attempts are stored under
   const wait = await lockout(c.env, ip(c.req), username);
   if (wait) throw new HttpError(429, `Too many failed attempts. Try again in ${wait} seconds.`);
   const u = await q1(c.env, "SELECT * FROM users WHERE username=?", username);
@@ -730,7 +736,7 @@ route("POST", "/api/mfa", async (c) => {
   const wait = await lockout(c.env, ip(c.req), u.username + ":mfa");
   if (wait) throw new HttpError(429, `Too many attempts. Try again in ${wait} seconds.`);
   const code = String((await c.body()).code || "").trim();
-  let ok = await verifyTotp(u.totp_secret, code);
+  let ok = await verifyTotp(c.env, u.totp_secret, code);
   if (!ok && code.includes("-")) {
     const h = await sha256(code.toLowerCase()); const rec = J(u.recovery, []);
     if (rec.includes(h)) { ok = true; await run(c.env, "UPDATE users SET recovery=? WHERE id=?", JSON.stringify(rec.filter((x) => x !== h)), u.id); await audit(c.env, "mfa", "recovery code used"); }
@@ -751,8 +757,9 @@ route("POST", "/api/password", async (c) => {
   const d = await c.body();
   const u = await q1(c.env, "SELECT * FROM users WHERE id=?", c.s.user_id);
   if (!safeEq(await hmacHex(await secret(c.env), String(d.current_verifier || "")), u.verifier_hash)) throw new HttpError(401, "Current password is incorrect.");
-  if (!/^[0-9a-f]{32}$/.test(d.salt || "") || !/^[0-9a-f]{64}$/.test(d.verifier || "")) throw new HttpError(400, "Malformed credentials.");
-  await run(c.env, "UPDATE users SET salt=?, verifier_hash=?, iterations=? WHERE id=?", d.salt, await hmacHex(await secret(c.env), d.verifier), +d.iterations || ITER, u.id);
+  const iterations = d.iterations === undefined ? ITER : +d.iterations;
+  if (!/^[0-9a-f]{32}$/.test(d.salt || "") || !/^[0-9a-f]{64}$/.test(d.verifier || "") || !(iterations >= 300000)) throw new HttpError(400, "Malformed credentials.");
+  await run(c.env, "UPDATE users SET salt=?, verifier_hash=?, iterations=? WHERE id=?", d.salt, await hmacHex(await secret(c.env), d.verifier), iterations, u.id);
   await run(c.env, "DELETE FROM sessions WHERE user_id=? AND token_hash<>?", u.id, c.s.token_hash);
   await audit(c.env, "password_changed", u.username);
   return { ok: true };
@@ -765,7 +772,7 @@ route("POST", "/api/mfa/setup", async (c) => {
 });
 route("POST", "/api/mfa/enable", async (c) => {
   const sec = await kvGet(c.env, "pending_totp");
-  if (!sec || !(await verifyTotp(sec, (await c.body()).code))) throw new HttpError(400, "Code didn't match. Check your authenticator's clock and try again.");
+  if (!sec || !(await verifyTotp(c.env, sec, (await c.body()).code))) throw new HttpError(400, "Code didn't match. Check your authenticator's clock and try again.");
   const codes = Array.from({ length: 10 }, () => hex(rand(2)) + "-" + hex(rand(2)));
   const hashes = await Promise.all(codes.map((x) => sha256(x)));
   await run(c.env, "UPDATE users SET totp_secret=?, totp_enabled=1, recovery=? WHERE id=?", sec, JSON.stringify(hashes), c.s.user_id);
@@ -814,7 +821,7 @@ route("GET", "/api/boot", async (c) => {
     `"records":[${live.map(rowJson).join(",")}]`, `"deleted":${JSON.stringify(dead)}`,
     `"settings":${JSON.stringify(settings)}`,
     `"alerts":[${alerts.map((a) => JSON.stringify(Object.assign({}, a, { body: undefined })).replace(/}$/, `,"body":${a.body || "{}"}}`)).join(",")}]`,
-    `"seen":${JSON.stringify(seen)}`, `"snapshots":[${snaps.map((s) => `{"day":"${s.day}","data":${s.data}}`).join(",")}]`,
+    `"seen":${JSON.stringify(seen)}`, `"snapshots":[${snaps.map((s) => `{"day":${JSON.stringify(s.day)},"data":${s.data || "{}"}}`).join(",")}]`,
     `"series_index":${JSON.stringify(idx)}`, `"jobs":${JSON.stringify(jobs)}`, `"engine":${JSON.stringify(engine)}`,
   ];
   return "{" + parts.join(",") + "}";
@@ -850,7 +857,9 @@ async function proxy(c) {
   const key = new Request("https://vantage-cache.internal/" + encodeURIComponent(u.href + (body ? "#" + hash53(body) : "")));
   if (cache) { const hit = await cache.match(key); if (hit) return hit; }
   const r = await upstream(c.env, u.href, { ttl, method: isPost ? "POST" : "GET", body, headers: isPost ? { "Content-Type": "application/json" } : {} });
-  const resp = new Response(r.body, { status: r.status, headers: { "Content-Type": r.headers.get("Content-Type") || "application/octet-stream", "Cache-Control": `private, max-age=${ttl}`, "X-Fetched": String(now()), ...SEC_HEADERS } });
+  // Third-party bytes served from our own origin: the app only fetch()es them, so a sandbox CSP costs nothing and
+  // stops an upstream HTML/SVG body from ever running script as Vantage if it is opened directly.
+  const resp = new Response(r.body, { status: r.status, headers: { "Content-Type": r.headers.get("Content-Type") || "application/octet-stream", "Cache-Control": `private, max-age=${ttl}`, "X-Fetched": String(now()), ...SEC_HEADERS, "Content-Security-Policy": "sandbox; default-src 'none'" } });
   if (cache && r.ok) c.ctx.waitUntil(cache.put(key, resp.clone()));
   return resp;
 }
@@ -862,8 +871,23 @@ route("GET", "/api/r/(\\w+)", async (c, kind) => {
   if (!KINDS.has(kind)) throw new HttpError(404, "Unknown type");
   return `{"items":[${(await q(c.env, "SELECT * FROM records WHERE space=? AND kind=? AND deleted=0 ORDER BY created", c.space, kind)).map(rowJson).join(",")}]}`;
 });
-route("GET", "/api/r/(\\w+)/([\\w-]+)", async (c, kind, id) => { const r = await getRecord(c.env, c.space, id); if (!r) throw new HttpError(404, "Not found"); return r; });
-route("GET", "/api/r/(\\w+)/([\\w-]+)/revisions", async (c, kind, id) => ({ revisions: (await q(c.env, "SELECT * FROM revisions WHERE record_id=? ORDER BY rid", id)).map((r) => ({ ts: r.ts, action: r.action, data: J(r.data, {}) })) }));
+// The URL's kind must match the stored record in the current space: otherwise a demo session could read live
+// revisions, and PUT /api/r/note/<decision id> would skip the decision lock below.
+async function recordOr404(c, kind, id) {
+  if (!KINDS.has(kind)) throw new HttpError(404, "Unknown type");
+  const r = await getRecord(c.env, c.space, id);
+  if (!r || r._kind !== kind) throw new HttpError(404, "Not found");
+  return r;
+}
+const DECISION_LOCKED = ["decision", "rationale", "assumptions", "alternatives", "expectations", "date", "title", "price_at_decision"];
+const isLocked = (rec) => rec._kind === "decision" && now() - rec._created > 86400;
+const touchesLocked = (rec, d) => DECISION_LOCKED.some((k) => k in d && JSON.stringify(d[k]) !== JSON.stringify(rec[k]));
+
+route("GET", "/api/r/(\\w+)/([\\w-]+)", async (c, kind, id) => recordOr404(c, kind, id));
+route("GET", "/api/r/(\\w+)/([\\w-]+)/revisions", async (c, kind, id) => {
+  await recordOr404(c, kind, id);
+  return { revisions: (await q(c.env, "SELECT * FROM revisions WHERE record_id=? ORDER BY rid", id)).map((r) => ({ ts: r.ts, action: r.action, data: J(r.data, {}) })) };
+});
 route("POST", "/api/r/(\\w+)", async (c, kind) => {
   if (!KINDS.has(kind)) throw new HttpError(404, "Unknown type");
   const d = sanitize(kind, await c.body());
@@ -872,11 +896,26 @@ route("POST", "/api/r/(\\w+)", async (c, kind) => {
 });
 route("POST", "/api/bulk", async (c) => { // bulk create/update (imports)
   const d = await c.body();
-  const items = (d.items || []).slice(0, 3000);
+  const items = (Array.isArray(d.items) ? d.items : []).slice(0, 3000).filter((it) => it && KINDS.has(it.kind));
+  // updates may only touch existing records of the same kind in this space, and never a locked decision
+  const ids = [...new Set(items.filter((it) => it.id).map((it) => String(it.id)))];
+  const existing = new Map();
+  for (let i = 0; i < ids.length; i += 90) { // D1 caps bound parameters at 100 per statement
+    const part = ids.slice(i, i + 90);
+    for (const r of await q(c.env, `SELECT id, kind, data, created FROM records WHERE space=? AND deleted=0 AND id IN (${part.map(() => "?").join(",")})`, c.space, ...part))
+      existing.set(r.id, Object.assign(J(r.data, {}), { _kind: r.kind, _created: r.created }));
+  }
   const t = now(), stmts = [];
+  let written = 0;
   for (const it of items) {
-    if (!KINDS.has(it.kind)) continue;
-    const body = JSON.stringify(clean(sanitize(it.kind, it.data)));
+    const data = sanitize(it.kind, it.data);
+    if (it.id) {
+      const cur = existing.get(String(it.id));
+      if (!cur || cur._kind !== it.kind) continue;
+      if (isLocked(cur) && touchesLocked(cur, data)) throw new HttpError(409, "Original reasoning is locked after 24 hours so hindsight can't rewrite it. Add a review instead.");
+    }
+    const body = JSON.stringify(clean(data));
+    written++;
     if (it.id) {
       stmts.push(c.env.DB.prepare("UPDATE records SET data=?, updated=? WHERE id=? AND space=?").bind(body, t, it.id, c.space));
       stmts.push(c.env.DB.prepare("INSERT INTO revisions (record_id, ts, action, data) VALUES (?,?,?,?)").bind(it.id, t, "update", body));
@@ -887,19 +926,20 @@ route("POST", "/api/bulk", async (c) => { // bulk create/update (imports)
     }
   }
   for (let i = 0; i < stmts.length; i += 50) await c.env.DB.batch(stmts.slice(i, i + 50));
-  return { ok: true, written: items.length };
+  return { ok: true, written };
 });
 route("PUT", "/api/r/(\\w+)/([\\w-]+)", async (c, kind, id) => {
-  const cur = await getRecord(c.env, c.space, id);
-  if (!cur) throw new HttpError(404, "Not found");
+  const cur = await recordOr404(c, kind, id);
   const d = sanitize(kind, await c.body());
-  if (kind === "decision" && now() - cur._created > 86400) {
-    const locked = ["decision", "rationale", "assumptions", "alternatives", "expectations", "date", "title", "price_at_decision"];
-    if (locked.some((k) => k in d && JSON.stringify(d[k]) !== JSON.stringify(cur[k]))) throw new HttpError(409, "Original reasoning is locked after 24 hours so hindsight can't rewrite it. Add a review instead.");
+  const merge = c.url.searchParams.get("replace") !== "1";
+  if (isLocked(cur)) {
+    if (touchesLocked(cur, d)) throw new HttpError(409, "Original reasoning is locked after 24 hours so hindsight can't rewrite it. Add a review instead.");
+    if (!merge) for (const k of DECISION_LOCKED) if (k in cur) d[k] = cur[k]; // a full replace may not drop them either
   }
-  return updateRecord(c.env, c.space, id, d, c.url.searchParams.get("replace") !== "1");
+  return updateRecord(c.env, c.space, id, d, merge);
 });
 route("DELETE", "/api/r/(\\w+)/([\\w-]+)", async (c, kind, id) => {
+  await recordOr404(c, kind, id);
   await c.env.DB.batch([
     c.env.DB.prepare("UPDATE records SET deleted=1, updated=? WHERE id=? AND space=?").bind(now(), id, c.space),
     c.env.DB.prepare("INSERT INTO revisions (record_id, ts, action, data) VALUES (?,?,?,?)").bind(id, now(), "delete", "{}"),
@@ -955,6 +995,8 @@ route("POST", "/api/visit", async (c) => {
 route("POST", "/api/snapshot", async (c) => {
   const d = await c.body();
   const day = String(d.day || new Date().toISOString().slice(0, 10)).slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new HttpError(400, "day must be YYYY-MM-DD");
+  if (d.data !== undefined && (!d.data || typeof d.data !== "object" || Array.isArray(d.data))) throw new HttpError(400, "data must be an object");
   const prev = await q1(c.env, "SELECT data FROM snapshots WHERE space=? AND day=?", c.space, day);
   const body = Object.assign(prev ? J(prev.data, {}) : {}, d.data || {});
   await run(c.env, "INSERT OR REPLACE INTO snapshots VALUES (?,?,?,?)", c.space, day, now(), JSON.stringify(body));

@@ -4,7 +4,8 @@ Design notes
 - Passwords: PBKDF2-HMAC-SHA256, 600k iterations, per-user 16-byte salt.
 - Sessions: 256-bit random token in an HttpOnly SameSite=Strict cookie; only its
   SHA-256 lives in the database, so a stolen DB file cannot be replayed.
-- MFA: RFC 6238 TOTP (30 s, 6 digits, +/-1 step) plus ten single-use recovery codes.
+- MFA: RFC 6238 TOTP (30 s, 6 digits, +/-1 step) plus ten single-use recovery codes. An accepted
+  code's time step is remembered, so a code that was seen once can't be replayed (RFC 6238 s5.2).
 - Brute force: failures per IP and per username back off exponentially.
 - First run: an account can only be created with the one-time setup code the
   server prints to its console, so exposing the port early cannot be hijacked.
@@ -113,25 +114,32 @@ def create_user(username, pw, code):
 
 # ---------- rate limiting ----------
 
+def _attempt_key(username):
+    # stored and queried in the same form, so an over-long username can't dodge its own counter
+    return username.lower()[:64]
+
+
 def lockout_remaining(ip, username):
     now = time.time()
     window = now - 3600
+    user = _attempt_key(username)
     fails_ip = db.q1("SELECT COUNT(*) n FROM login_attempts WHERE ip=? AND ok=0 AND ts>?", (ip, window))["n"]
     fails_user = db.q1("SELECT COUNT(*) n FROM login_attempts WHERE username=? AND ok=0 AND ts>?",
-                       (username.lower(), window))["n"]
+                       (user, window))["n"]
     n = max(fails_ip, fails_user)
     if n < 5:
         return 0
     last = db.q1("SELECT MAX(ts) t FROM login_attempts WHERE (ip=? OR username=?) AND ok=0",
-                 (ip, username.lower()))["t"] or 0
+                 (ip, user))["t"] or 0
     wait = min(2 ** (n - 4), 900)
     return max(0, int(last + wait - now))
 
 
 def record_attempt(ip, username, ok):
-    db.run("INSERT INTO login_attempts VALUES (?,?,?,?)", (time.time(), ip, username.lower()[:64], 1 if ok else 0))
+    user = _attempt_key(username)
+    db.run("INSERT INTO login_attempts VALUES (?,?,?,?)", (time.time(), ip, user, 1 if ok else 0))
     if ok:
-        db.run("DELETE FROM login_attempts WHERE (ip=? OR username=?) AND ok=0", (ip, username.lower()))
+        db.run("DELETE FROM login_attempts WHERE (ip=? OR username=?) AND ok=0", (ip, user))
     db.run("DELETE FROM login_attempts WHERE ts<?", (time.time() - 30 * 86400,))
 
 
@@ -148,9 +156,10 @@ def new_session(user_id, ip, ua, remember, mfa_pending=False):
     if mfa_pending:
         ttl = 300
     prev = db.q1("SELECT space FROM sessions WHERE user_id=? ORDER BY last_seen DESC LIMIT 1", (user_id,))
-    db.run("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?)",
+    db.run("INSERT INTO sessions (token_hash, user_id, created, last_seen, expires, ip, ua, space, mfa_pending, remember) "
+           "VALUES (?,?,?,?,?,?,?,?,?,?)",
            (_h(token), user_id, now, now, now + ttl, ip, ua[:200], (prev or {}).get("space", "live"),
-            1 if mfa_pending else 0))
+            1 if mfa_pending else 0, 1 if remember else 0))
     return token, ttl
 
 
@@ -167,11 +176,6 @@ def get_session(token):
     if now - s["last_seen"] > 60:
         db.run("UPDATE sessions SET last_seen=? WHERE token_hash=?", (now, s["token_hash"]))
     return s
-
-
-def promote_session(token):
-    db.run("UPDATE sessions SET mfa_pending=0, expires=? WHERE token_hash=?",
-           (time.time() + SHORT_TTL, _h(token)))
 
 
 def set_space(token, space):
@@ -211,12 +215,29 @@ def totp_at(secret, counter):
     return "%06d" % code
 
 
-def verify_totp(secret, code):
+def _totp_step(secret, code):
+    """The time step the code matches (current +/-1), or None."""
     code = "".join(ch for ch in str(code) if ch.isdigit())
     if len(code) != 6 or not secret:
-        return False
+        return None
     step = int(time.time() // 30)
-    return any(hmac.compare_digest(totp_at(secret, step + d), code) for d in (-1, 0, 1))
+    for d in (-1, 0, 1):
+        if hmac.compare_digest(totp_at(secret, step + d), code):
+            return step + d
+    return None
+
+
+def verify_totp(secret, code):
+    """Check a code and burn its time step: each code (and any earlier one) works at most once."""
+    step = _totp_step(secret, code)
+    if step is None:
+        return False
+    with db._write_lock:
+        last = db.get_setting("_auth", "totp_last_step") or 0
+        if step <= last:
+            return False
+        db.set_setting("_auth", "totp_last_step", step)
+    return True
 
 
 def new_recovery_codes():

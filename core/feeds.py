@@ -6,7 +6,6 @@ last good value is returned with its original timestamp, or None.
 """
 import datetime as dt
 import email.utils
-import gzip
 import hashlib
 import html
 import json
@@ -17,6 +16,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 
 from . import db
@@ -27,16 +27,28 @@ except ImportError:  # pragma: no cover
     ZoneInfo = None
 
 BROWSER_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Vantage/1.0"
+MAX_RESPONSE = 32 * 1024 * 1024  # SEC submissions are the largest legitimate payloads, at a few MB
 
 
-def http_get(url, headers=None, timeout=15):
+class ResponseTooLarge(ValueError):
+    pass
+
+
+def http_get(url, headers=None, timeout=15, limit=MAX_RESPONSE):
+    """GET with a hard size cap on both the wire bytes and the decompressed body, so a huge or
+    gzip-bomb response (calendar links are user-supplied) can't exhaust memory."""
     h = {"User-Agent": BROWSER_UA, "Accept-Encoding": "gzip"}
     h.update(headers or {})
     req = urllib.request.Request(url, headers=h)
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        raw = r.read()
+        raw = r.read(limit + 1)
+        if len(raw) > limit:
+            raise ResponseTooLarge("response larger than %d MB" % (limit // 2 ** 20))
         if r.headers.get("Content-Encoding") == "gzip":
-            raw = gzip.decompress(raw)
+            d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            raw = d.decompress(raw, limit + 1)
+            if len(raw) > limit or d.unconsumed_tail:
+                raise ResponseTooLarge("decompressed response larger than %d MB" % (limit // 2 ** 20))
         return raw
 
 
@@ -159,6 +171,8 @@ def refresh_news():
         except Exception as e:  # noqa: BLE001
             db.source_err("news:" + fid, e)
             return feed, []
+        finally:
+            db.close()  # pool threads are discarded after this refresh
 
     with ThreadPoolExecutor(8) as ex:
         results = list(ex.map(one, FEEDS))
@@ -297,6 +311,7 @@ def quotes(tickers, max_age=600, force=False):
                 try:
                     _refresh_quotes(todo)
                 finally:
+                    db.close()
                     with _bg_lock:
                         _bg["running"].difference_update(todo)
             threading.Thread(target=run, daemon=True).start()
@@ -365,8 +380,6 @@ def convert(amount, ccy, base, table=None):
     if ccy == base:
         return amount
     table = table or fx_table()
-    if ccy == "GBP" and "GBP" not in table and "GBp" in table:
-        pass
     if ccy not in table or base not in table:
         return None
     return amount * table[ccy] / table[base]
@@ -639,8 +652,11 @@ def _expand(start, end, allday, rrule, lo, hi):
         return
     r = dict(p.split("=", 1) for p in rrule.split(";") if "=" in p)
     freq = r.get("FREQ", "")
-    interval = int(r.get("INTERVAL", "1") or 1)
-    count = int(r["COUNT"]) if "COUNT" in r else None
+    try:
+        interval = max(1, int(r.get("INTERVAL", "1") or 1))
+        count = int(r["COUNT"]) if "COUNT" in r else None
+    except ValueError:  # malformed rule: show the first occurrence rather than failing the whole calendar
+        interval, count, freq = 1, 1, ""
     until = None
     if "UNTIL" in r:
         try:
@@ -648,32 +664,30 @@ def _expand(start, end, allday, rrule, lo, hi):
         except ValueError:
             pass
     step = {"DAILY": dt.timedelta(days=interval), "WEEKLY": dt.timedelta(weeks=interval)}.get(freq)
-    cur, n = s0, 0
-    for _ in range(2000):
+    months = {"MONTHLY": interval, "YEARLY": 12 * interval}.get(freq)
+    if not step and not months:
+        if lo <= s0 <= hi:
+            yield fmt(s0), fmt(s0 + dur) if dur else None
+        return
+    n = 0
+    for k in range(2000):
         if count is not None and n >= count:
             break
-        if until and cur > until:
-            break
-        if cur > hi:
+        if step:
+            cur = s0 + k * step
+        else:
+            # count months from the first occurrence: a date that doesn't exist that month (the 31st, Feb 29)
+            # is skipped as RFC 5545 says, and later months keep the original day instead of drifting
+            m = s0.month - 1 + k * months
+            try:
+                cur = s0.replace(year=s0.year + m // 12, month=m % 12 + 1)
+            except ValueError:
+                continue
+        if (until and cur > until) or cur > hi:
             break
         if cur >= lo:
             yield fmt(cur), fmt(cur + dur) if dur else None
         n += 1
-        if step:
-            cur = cur + step
-        elif freq == "MONTHLY":
-            m = cur.month - 1 + interval
-            try:
-                cur = cur.replace(year=cur.year + m // 12, month=m % 12 + 1)
-            except ValueError:
-                break
-        elif freq == "YEARLY":
-            try:
-                cur = cur.replace(year=cur.year + interval)
-            except ValueError:
-                cur = cur.replace(year=cur.year + interval, day=28)
-        else:
-            break
 
 
 def fetch_ics(url):

@@ -67,16 +67,28 @@ class Handler(BaseHTTPRequestHandler):
         return c[COOKIE].value if COOKIE in c else None
 
     def body(self):
-        n = int(self.headers.get("Content-Length") or 0)
+        """The request's JSON object ({} when empty). Anything else is a 400, never a 500."""
+        if getattr(self, "_body", None) is not None:
+            return self._body
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            raise HTTPError(400, "Bad Content-Length")
+        if n < 0:
+            raise HTTPError(400, "Bad Content-Length")  # read(-1) would block until the client hangs up
         if n > MAX_BODY:
             raise HTTPError(413, "Request too large")
         raw = self.rfile.read(n) if n else b""
-        if not raw:
-            return {}
-        try:
-            return json.loads(raw.decode("utf-8"))
-        except ValueError:
-            raise HTTPError(400, "Invalid JSON")
+        d = {}
+        if raw:
+            try:
+                d = json.loads(raw.decode("utf-8"))
+            except ValueError:
+                raise HTTPError(400, "Invalid JSON")
+        if not isinstance(d, dict):
+            raise HTTPError(400, "Expected a JSON object")
+        self._body = d
+        return d
 
     def send(self, code, payload, ctype="application/json; charset=utf-8", extra=None):
         data = payload if isinstance(payload, (bytes, bytearray)) else json.dumps(payload, default=str).encode()
@@ -132,6 +144,7 @@ class Handler(BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path)
         path = u.path
         self.query = {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}
+        self._body = None
         try:
             if not path.startswith("/api/"):
                 return self.static(path)
@@ -167,6 +180,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             traceback.print_exc()
             self.send(500, {"error": "Server error: %s" % type(e).__name__})
+        finally:
+            db.close()
 
     def static(self, path):
         if path in ("/", "") or not os.path.splitext(path)[1]:
@@ -188,8 +203,25 @@ def need(d, *keys):
             raise HTTPError(400, "Missing field: %s" % k)
 
 
-def get_or_404(space, rid):
-    r = db.get_record(space, rid)
+def text(d, key, limit=None):
+    """A string field from a request body ("" when absent); a non-string is a 400, not a crash."""
+    v = d.get(key)
+    if v is None:
+        return ""
+    if not isinstance(v, str):
+        raise HTTPError(400, "%s must be text" % key)
+    return v[:limit] if limit else v
+
+
+def int_param(h, key, default):
+    try:
+        return int(h.query.get(key) or default)
+    except ValueError:
+        raise HTTPError(400, "%s must be a whole number" % key)
+
+
+def get_or_404(space, rid, kind=None):
+    r = db.get_record(space, rid, kind)
     if not r:
         raise HTTPError(404, "Record not found")
     return r
@@ -219,7 +251,7 @@ def setup(h):
     need(d, "code", "username", "password")
     if auth.lockout_remaining(h.ip(), "setup"):
         raise HTTPError(429, "Too many attempts. Wait and try again.")
-    err = auth.create_user(d["username"].strip(), d["password"], d["code"])
+    err = auth.create_user(text(d, "username").strip(), text(d, "password"), text(d, "code"))
     if err:
         auth.record_attempt(h.ip(), "setup", False)
         raise HTTPError(400, err)
@@ -230,16 +262,17 @@ def setup(h):
 @route("POST", "/api/login", False)
 def login(h):
     d = h.body()
-    user_name = (d.get("username") or "").strip().lower()
+    user_name = text(d, "username", 64).strip().lower()
+    password = text(d, "password")
     wait = auth.lockout_remaining(h.ip(), user_name)
     if wait:
         raise HTTPError(429, "Too many failed attempts. Try again in %d seconds." % wait)
     u = db.q1("SELECT * FROM users WHERE username=?", (user_name,))
     if not u:
-        auth.dummy_verify(d.get("password") or "")
+        auth.dummy_verify(password)
         auth.record_attempt(h.ip(), user_name, False)
         raise HTTPError(401, "Incorrect username or password.")
-    if not auth.verify_password(d.get("password") or "", u["pw_hash"]):
+    if not auth.verify_password(password, u["pw_hash"]):
         auth.record_attempt(h.ip(), user_name, False)
         db.audit("login_failed", "%s from %s" % (user_name, h.ip()))
         raise HTTPError(401, "Incorrect username or password.")
@@ -248,8 +281,6 @@ def login(h):
     token, ttl = auth.new_session(u["id"], h.ip(), h.headers.get("User-Agent") or "", remember, mfa_pending=bool(u["totp_enabled"]))
     if not u["totp_enabled"]:
         _mark_login(u, h.ip())
-    else:
-        db.set_setting("_auth", "remember:" + token[:12], remember)
     return 200, {"ok": True, "mfa": bool(u["totp_enabled"])}, {"Set-Cookie": h.set_cookie(token, ttl)}
 
 
@@ -269,14 +300,13 @@ def mfa(h):
     wait = auth.lockout_remaining(h.ip(), u["username"] + ":mfa")
     if wait:
         raise HTTPError(429, "Too many attempts. Try again in %d seconds." % wait)
-    code = (h.body().get("code") or "").strip()
+    code = text(h.body(), "code", 64).strip()
     ok = auth.verify_totp(u["totp_secret"], code) or ("-" in code and auth.use_recovery_code(u, code))
     auth.record_attempt(h.ip(), u["username"] + ":mfa", ok)
     if not ok:
         raise HTTPError(401, "That code didn't work.")
-    remember = db.get_setting("_auth", "remember:" + tok[:12]) or False
     auth.end_session(tok)
-    token, ttl = auth.new_session(u["id"], h.ip(), h.headers.get("User-Agent") or "", remember)
+    token, ttl = auth.new_session(u["id"], h.ip(), h.headers.get("User-Agent") or "", bool(s["remember"]))
     _mark_login(u, h.ip())
     return 200, {"ok": True}, {"Set-Cookie": h.set_cookie(token, ttl)}
 
@@ -292,12 +322,13 @@ def logout(h):
 def change_password(h):
     d = h.body()
     u = db.q1("SELECT * FROM users WHERE id=?", (h.sess["user_id"],))
-    if not auth.verify_password(d.get("current") or "", u["pw_hash"]):
+    if not auth.verify_password(text(d, "current"), u["pw_hash"]):
         raise HTTPError(401, "Current password is incorrect.")
-    probs = auth.password_problems(d.get("new") or "", u["username"])
+    new = text(d, "new")
+    probs = auth.password_problems(new, u["username"])
     if probs:
         raise HTTPError(400, " ".join(probs))
-    db.run("UPDATE users SET pw_hash=? WHERE id=?", (auth.hash_password(d["new"]), u["id"]))
+    db.run("UPDATE users SET pw_hash=? WHERE id=?", (auth.hash_password(new), u["id"]))
     auth.end_all_sessions(u["id"], keep_token=h.token())
     db.audit("password_changed", u["username"])
     return {"ok": True}
@@ -315,7 +346,7 @@ def mfa_setup(h):
 @route("POST", "/api/mfa/enable")
 def mfa_enable(h):
     secret = db.get_setting("_auth", "pending_totp")
-    if not secret or not auth.verify_totp(secret, h.body().get("code") or ""):
+    if not secret or not auth.verify_totp(secret, text(h.body(), "code", 64)):
         raise HTTPError(400, "Code didn't match. Check your authenticator's clock and try again.")
     codes, hashes = auth.new_recovery_codes()
     db.run("UPDATE users SET totp_secret=?, totp_enabled=1, recovery=? WHERE id=?", (secret, json.dumps(hashes), h.sess["user_id"]))
@@ -327,7 +358,7 @@ def mfa_enable(h):
 @route("POST", "/api/mfa/disable")
 def mfa_disable(h):
     u = db.q1("SELECT * FROM users WHERE id=?", (h.sess["user_id"],))
-    if not auth.verify_password(h.body().get("password") or "", u["pw_hash"]):
+    if not auth.verify_password(text(h.body(), "password"), u["pw_hash"]):
         raise HTTPError(401, "Password is incorrect.")
     db.run("UPDATE users SET totp_enabled=0, totp_secret=NULL, recovery='[]' WHERE id=?", (u["id"],))
     db.audit("mfa_disabled", "")
@@ -396,14 +427,6 @@ def home(h):
     }
 
 
-# dict union for py3.9 compat
-class _D(dict):
-    def __or__(self, other):
-        x = dict(self)
-        x.update(other)
-        return x
-
-
 def _onboarding(sp):
     steps = [
         ("holdings", "Add or import your holdings", bool(db.list_records(sp, "holding"))),
@@ -446,7 +469,7 @@ def visit(h):
 def briefing(h):
     sp = h.space
     port = engine.portfolio(sp)
-    hours = min(168, int(h.query.get("hours") or 36))
+    hours = max(1, min(168, int_param(h, "hours", 36)))
     st = intel.stories(sp, hours=hours, limit=60, port=port)
     topic = h.query.get("topic")
     if topic and topic != "all":
@@ -458,6 +481,8 @@ def briefing(h):
 @route("POST", "/api/seen")
 def seen(h):
     keys = h.body().get("keys") or []
+    if not isinstance(keys, list):
+        raise HTTPError(400, "keys must be a list")
     for k in keys[:200]:
         db.run("INSERT OR REPLACE INTO seen VALUES (?,?,?)", (h.space, str(k)[:100], time.time()))
     return {"ok": True}
@@ -639,7 +664,13 @@ def import_holdings(h):
 
 @route("POST", "/api/scenario")
 def scenario(h):
-    return engine.scenario(h.space, h.body().get("inputs") or {})
+    inputs = h.body().get("inputs") or {}
+    if not isinstance(inputs, dict) or not isinstance(inputs.get("factors") or {}, dict):
+        raise HTTPError(400, "inputs must be an object")
+    try:
+        return engine.scenario(h.space, inputs)
+    except (TypeError, ValueError):
+        raise HTTPError(400, "Scenario inputs must be numbers")
 
 
 @route("GET", "/api/scenario/presets")
@@ -920,6 +951,9 @@ def replay(h, did):
 # Generic records
 # =====================================================================
 
+DECISION_LOCKED = ("decision", "rationale", "assumptions", "alternatives", "expectations", "date", "title", "price_at_decision")
+
+
 def _check_kind(kind):
     if kind not in KINDS:
         raise HTTPError(404, "Unknown record type")
@@ -932,7 +966,7 @@ def _sanitize(kind, d):
         raise HTTPError(413, "Record too large")
     if kind == "holding":
         if d.get("ticker"):
-            d["ticker"] = d["ticker"].strip().upper()
+            d["ticker"] = str(d["ticker"]).strip().upper()
         for k in ("quantity", "cost", "manual_price", "cost_base_total", "target_weight", "beta"):
             if k in d and d[k] not in (None, ""):
                 v = _num(d[k])
@@ -958,13 +992,13 @@ def r_list(h, kind):
 @route("GET", "/api/r/(\\w+)/([\\w]+)")
 def r_get(h, kind, rid):
     _check_kind(kind)
-    return get_or_404(h.space, rid)
+    return get_or_404(h.space, rid, kind)
 
 
 @route("GET", "/api/r/(\\w+)/([\\w]+)/revisions")
 def r_revs(h, kind, rid):
     _check_kind(kind)
-    get_or_404(h.space, rid)
+    get_or_404(h.space, rid, kind)
     return {"revisions": db.revisions(rid)}
 
 
@@ -988,21 +1022,24 @@ def r_create(h, kind):
 @route("PUT", "/api/r/(\\w+)/([\\w]+)")
 def r_update(h, kind, rid):
     _check_kind(kind)
-    cur = get_or_404(h.space, rid)
+    # the kind must match the stored record: otherwise PUT /api/r/note/<decision id> would skip the decision lock
+    cur = get_or_404(h.space, rid, kind)
     d = _sanitize(kind, h.body())
+    merge = h.query.get("replace") != "1"
     if kind == "decision" and time.time() - cur["_created"] > 86400:
         # original reasoning is locked after 24h; only reviews/status/review_date may change
-        locked = {"decision", "rationale", "assumptions", "alternatives", "expectations", "date", "title", "price_at_decision"}
-        changed = [k for k in locked if k in d and d[k] != cur.get(k)]
+        changed = [k for k in DECISION_LOCKED if k in d and d[k] != cur.get(k)]
         if changed:
             raise HTTPError(409, "Original reasoning is locked after 24 hours so hindsight can't rewrite it. Add a review or an amendment instead.")
-    return db.update_record(h.space, rid, d, merge=h.query.get("replace") != "1")
+        if not merge:  # a full replace may not drop the locked fields either
+            d.update({k: cur[k] for k in DECISION_LOCKED if k in cur})
+    return db.update_record(h.space, rid, d, merge=merge)
 
 
 @route("DELETE", "/api/r/(\\w+)/([\\w]+)")
 def r_delete(h, kind, rid):
     _check_kind(kind)
-    get_or_404(h.space, rid)
+    get_or_404(h.space, rid, kind)
     db.delete_record(h.space, rid)
     return {"ok": True}
 
@@ -1030,7 +1067,9 @@ def save_settings(h):
         if k in SETTING_KEYS:
             db.set_setting(h.space, k, v)
         elif k in LIVE_ONLY_KEYS:
-            if k == "anthropic_key" and v and not str(v).startswith("sk-"):
+            if v is not None and not isinstance(v, str):
+                raise HTTPError(400, "%s must be text" % k)
+            if k == "anthropic_key" and v and not v.startswith("sk-"):
                 raise HTTPError(400, "That doesn't look like an Anthropic API key.")
             db.set_setting("live", k, (v or "").strip() or None)
         else:
@@ -1080,20 +1119,37 @@ def import_json(h):
     d = h.body()
     if d.get("vantage_export") != 1:
         raise HTTPError(400, "Not a Vantage export file")
+    records = d.get("records") or {}
+    if not isinstance(records, dict) or not all(isinstance(v, list) for v in records.values()):
+        raise HTTPError(400, "records must map each kind to a list")
     db.backup("pre-import")
-    n = 0
-    for kind, items in (d.get("records") or {}).items():
+    n, skipped = 0, 0
+    for kind, items in records.items():
         if kind not in KINDS:
             continue
         for it in items:
-            if db.q1("SELECT id FROM records WHERE id=?", (it.get("id"),)):
+            if not isinstance(it, dict):
+                skipped += 1
                 continue
-            db.create_record(h.space, kind, it, rid=it.get("id"), ts=it.get("_created"))
+            rid = it.get("id")
+            if rid is not None and (not isinstance(rid, str) or not re.fullmatch(r"\w{1,64}", rid)):
+                skipped += 1
+                continue
+            if rid and db.q1("SELECT id FROM records WHERE id=?", (rid,)):
+                skipped += 1
+                continue
+            try:
+                data = _sanitize(kind, dict(it))
+            except HTTPError:
+                skipped += 1
+                continue
+            ts = it.get("_created")
+            db.create_record(h.space, kind, data, rid=rid, ts=ts if isinstance(ts, (int, float)) else None)
             n += 1
     for k, v in (d.get("settings") or {}).items():
         if k in SETTING_KEYS:
             db.set_setting(h.space, k, v)
-    return {"imported": n}
+    return {"imported": n, "skipped": skipped}
 
 
 @route("POST", "/api/backup")

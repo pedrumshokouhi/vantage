@@ -4,7 +4,7 @@ import datetime as dt
 import re
 import time
 
-from . import ai, db, engine, intel, kb
+from . import ai, db, engine, intel
 
 SEARCH_KINDS = ("holding", "contact", "event", "decision", "note", "watch", "plan", "scenario", "investor")
 

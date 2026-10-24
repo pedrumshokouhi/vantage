@@ -73,7 +73,7 @@ It listens on this Mac only. For phone access, put it behind HTTPS, e.g. **Tails
 
 ## Security
 
-PBKDF2-SHA256 (600k) passwords · 256-bit session tokens stored only as hashes · HttpOnly + SameSite=Strict cookies · CSRF header + origin checks · strict CSP (no inline scripts) · exponential login back-off · TOTP 2FA with recovery codes · session list + revoke · security audit log · DB and backups `chmod 600` in a `700` folder · daily automatic backups (20 kept). For encryption at rest keep FileVault on.
+PBKDF2-SHA256 (600k) passwords · 256-bit session tokens stored only as hashes · HttpOnly + SameSite=Strict cookies · CSRF header + origin checks · strict CSP (no inline scripts) · exponential login back-off · TOTP 2FA (each code accepted once) with recovery codes · session list + revoke · security audit log · DB and backups `chmod 600` in a `700` folder · daily automatic backups (20 kept). For encryption at rest keep FileVault on.
 
 ## Layout
 
@@ -89,5 +89,16 @@ core/intel.py         briefing, calendar, week ahead, prep, network, radar, prio
 core/cos.py           chief-of-staff retrieval
 core/ai.py            optional Claude layer
 static/               single-page app (vanilla JS, hand-built SVG/canvas charts)
+tests/                backend tests (standard library only)
+cloud/tests/          Cloudflare Worker tests (Node 22+, in-memory SQLite stand-in for D1)
 data/                 your database, backups (git-ignored)
 ```
+
+## Tests
+
+```
+python3 -m unittest discover -s tests          # local server: auth, records, calendar parsing, HTTP API
+node --test cloud/tests/worker.test.mjs        # Cloudflare Worker: auth, records, decision lock, MFA
+```
+
+Both run offline against throwaway databases, and run on every push via GitHub Actions.
