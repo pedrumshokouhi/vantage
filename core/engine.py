@@ -8,8 +8,8 @@ Labels used throughout (the UI renders each distinctly):
 """
 import bisect
 import datetime as dt
-import math
 import re
+import threading
 import time
 
 from . import db, feeds, kb
@@ -101,7 +101,30 @@ def _norm_ccy(ccy, price):
 PERIODS = {"1d": 1, "1m": 30, "ytd": None, "1y": 365}
 
 
+# One portfolio per request: handlers, the briefing, the radar and the consequence map all need it, and
+# building it reads every holding, quote and FX series. The server opens a scope per request; outside one
+# (the background worker) every call computes afresh.
+_scope = threading.local()
+
+
+class request_scope:
+    def __enter__(self):
+        _scope.cache = {}
+
+    def __exit__(self, *exc):
+        _scope.cache = None
+
+
 def portfolio(space, force=False):
+    cache = getattr(_scope, "cache", None)
+    if cache is None:
+        return _portfolio(space, force)
+    if force or space not in cache:
+        cache[space] = _portfolio(space, force)
+    return cache[space]
+
+
+def _portfolio(space, force=False):
     base = base_ccy(space)
     holdings = db.list_records(space, "holding")
     tickers = [h["ticker"] for h in holdings if h.get("ticker") and h["ticker"].upper() not in ("CASH",)]

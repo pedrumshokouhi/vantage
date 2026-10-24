@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS users (
 );
 CREATE TABLE IF NOT EXISTS sessions (
   token_hash TEXT PRIMARY KEY, user_id INTEGER, created REAL, last_seen REAL,
-  expires REAL, ip TEXT, ua TEXT, space TEXT DEFAULT 'live', mfa_pending INTEGER DEFAULT 0
+  expires REAL, ip TEXT, ua TEXT, space TEXT DEFAULT 'live', mfa_pending INTEGER DEFAULT 0,
+  remember INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS login_attempts (ts REAL, ip TEXT, username TEXT, ok INTEGER);
 CREATE TABLE IF NOT EXISTS audit (ts REAL, event TEXT, detail TEXT);
@@ -60,6 +61,9 @@ CREATE TABLE IF NOT EXISTS alerts (
 CREATE UNIQUE INDEX IF NOT EXISTS alerts_key ON alerts(space, key);
 """
 
+# Columns added after a database was first created. Each runs once; "duplicate column" means it already ran.
+MIGRATIONS = ["ALTER TABLE sessions ADD COLUMN remember INTEGER DEFAULT 0"]
+
 _local = threading.local()
 _write_lock = threading.RLock()
 
@@ -73,6 +77,14 @@ def init():
         pass
     c = conn()
     c.executescript(SCHEMA)
+    for m in MIGRATIONS:
+        try:
+            c.execute(m)
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e):
+                raise
+    # older builds parked the MFA "remember me" flag in settings under a token prefix; it lives on the session now
+    c.execute("DELETE FROM settings WHERE space='_auth' AND key LIKE 'remember:%'")
     c.commit()
     try:
         os.chmod(DB_PATH, 0o600)
@@ -90,6 +102,14 @@ def conn():
         c.execute("PRAGMA foreign_keys=ON")
         _local.c = c
     return c
+
+
+def close():
+    """Close this thread's connection (request threads are short-lived; don't leave it to the GC)."""
+    c = getattr(_local, "c", None)
+    if c is not None:
+        _local.c = None
+        c.close()
 
 
 def q(sql, args=()):
@@ -155,8 +175,11 @@ def list_records(space, kind):
         "SELECT * FROM records WHERE space=? AND kind=? AND deleted=0 ORDER BY created", (space, kind))]
 
 
-def get_record(space, rid):
-    r = q1("SELECT * FROM records WHERE space=? AND id=? AND deleted=0", (space, rid))
+def get_record(space, rid, kind=None):
+    if kind is None:
+        r = q1("SELECT * FROM records WHERE space=? AND id=? AND deleted=0", (space, rid))
+    else:
+        r = q1("SELECT * FROM records WHERE space=? AND id=? AND kind=? AND deleted=0", (space, rid, kind))
     return _row(r) if r else None
 
 
@@ -177,14 +200,15 @@ def create_record(space, kind, data, rid=None, ts=None):
 
 
 def update_record(space, rid, data, merge=True):
-    cur = get_record(space, rid)
-    if not cur:
-        return None
-    new = _clean(cur) if merge else {}
-    new.update(_clean(data))
-    body = json.dumps(new)
-    now = time.time()
+    # read-modify-write under the lock so two concurrent merges can't drop each other's fields
     with _write_lock:
+        cur = get_record(space, rid)
+        if not cur:
+            return None
+        new = _clean(cur) if merge else {}
+        new.update(_clean(data))
+        body = json.dumps(new)
+        now = time.time()
         c = conn()
         c.execute("UPDATE records SET data=?, updated=? WHERE id=? AND space=?", (body, now, rid, space))
         c.execute("INSERT INTO revisions (record_id, ts, action, data) VALUES (?,?,?,?)", (rid, now, "update", body))
@@ -221,13 +245,11 @@ def wipe_space(space):
 
 # ---------- cache + source status ----------
 
-def cache_get(key, max_age=None):
+def cache_get(key):
     r = q1("SELECT * FROM cache WHERE key=?", (key,))
     if not r:
         return None, None
-    if max_age is not None and time.time() - r["fetched"] > max_age:
-        return json.loads(r["data"]), r["fetched"]  # stale value still returned; caller decides
-    return json.loads(r["data"]), r["fetched"]
+    return json.loads(r["data"]), r["fetched"]  # stale values are returned too; callers compare `fetched` themselves
 
 
 def cache_put(key, data):

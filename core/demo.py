@@ -40,19 +40,25 @@ def seed():
                                       "expect": "Returns >10% with oil above $65 WTI.", "wrong_if": "Oil below $55 for a year, or the federal emissions cap forces production cuts.",
                                       "indicators": ["oil", "emissions cap", "wcs", "opec"], "horizon": "3+ years", "conviction": 3}),
         ("ENB.TO", 300, 50, "TFSA", {"why": "Regulated-like pipeline cash flows fund a growing dividend.", "expect": "Dividend growth 3-5% a year.",
-                                    "wrong_if": "Payout coverage weakens or rates stay high enough to pressure the valuation.", "indicators": ["distributable cash flow", "rates"], "horizon": "5+ years", "conviction": 3}),
+                                    "wrong_if": "Payout coverage weakens or rates stay high enough to pressure the valuation.",
+                                    "indicators": ["distributable cash flow", "rates"], "horizon": "5+ years", "conviction": 3}),
         ("NVDA", 90, 110, "RRSP", {"why": "The default platform for AI compute; CUDA software moat plus networking make it more than a chip company.",
-                                  "expect": "Data-centre revenue keeps compounding while hyperscalers expand capex.", "wrong_if": "Hyperscaler capex guidance falls, custom chips take share, or export controls cut China materially.",
+                                  "expect": "Data-centre revenue keeps compounding while hyperscalers expand capex.",
+                                  "wrong_if": "Hyperscaler capex guidance falls, custom chips take share, or export controls cut China materially.",
                                   "indicators": ["capex", "data center", "export controls", "custom chips", "blackwell"], "horizon": "2-4 years", "conviction": 4}),
         ("AAPL", 60, 180, "Taxable", {"why": "Installed base of 2B+ devices monetised through services.", "expect": "Services growth offsets flat hardware.",
-                                     "wrong_if": "App Store fees are forced down materially or China sales keep shrinking.", "indicators": ["app store", "services", "china"], "horizon": "5 years", "conviction": 3}),
+                                     "wrong_if": "App Store fees are forced down materially or China sales keep shrinking.",
+                                     "indicators": ["app store", "services", "china"], "horizon": "5 years", "conviction": 3}),
         ("MSFT", 25, 380, "RRSP", None),
         ("TSM", 70, 150, "RRSP", {"why": "Sole supplier at the leading edge for AI accelerators and iPhone chips.", "expect": "Advanced-node revenue share keeps rising.",
-                                 "wrong_if": "Military escalation around Taiwan, or overseas fabs dilute margins more than expected.", "indicators": ["taiwan", "margins", "arizona"], "horizon": "3-5 years", "conviction": 3}),
+                                 "wrong_if": "Military escalation around Taiwan, or overseas fabs dilute margins more than expected.",
+                                 "indicators": ["taiwan", "margins", "arizona"], "horizon": "3-5 years", "conviction": 3}),
         ("BRK-B", 30, 400, "Taxable", None),
-        ("XEQT.TO", 800, 30, "TFSA", {"why": "Core global equity exposure at low cost.", "expect": "Market returns.", "wrong_if": "N/A: core holding.", "indicators": [], "horizon": "20+ years", "conviction": 5}),
+        ("XEQT.TO", 800, 30, "TFSA",
+         {"why": "Core global equity exposure at low cost.", "expect": "Market returns.", "wrong_if": "N/A: core holding.", "indicators": [], "horizon": "20+ years", "conviction": 5}),
         ("AC.TO", 300, 18, "Taxable", {"why": "Travel recovery and fleet renewal; cheap relative to earnings.", "expect": "Re-rating as margins normalise.",
-                                      "wrong_if": "Fuel costs spike or consumer travel demand weakens.", "indicators": ["fuel", "jet fuel", "travel demand", "strike"], "horizon": "1-2 years", "conviction": 2}),
+                                      "wrong_if": "Fuel costs spike or consumer travel demand weakens.",
+                                      "indicators": ["fuel", "jet fuel", "travel demand", "strike"], "horizon": "1-2 years", "conviction": 2}),
     ]
     for tkr, qty, cost, acct, th in H:
         rec = {"ticker": tkr, "quantity": qty, "cost": cost, "account": acct}
@@ -71,21 +77,26 @@ def seed():
                       ("BN.TO", "Private-markets exposure if rates fall")):
         db.create_record(S, "watch", {"ticker": t, "reason": reason})
     C = [
-        ("c1", "Maya Okafor", "Partner", "Northstar Ventures", "Venture capital", "Toronto", 5, 4, 3, "MBA classmate", None, ["founder", "investor"], ["climate", "fintech", "running"], _d(5 - 365 * 34), 12),
-        ("c2", "Daniel Reyes", "Head of Product", "Shopify", "Technology", "Ottawa", 4, 3, 2, "Met at Collision conference 2024", "c1", ["product", "operator"], ["commerce", "design"], _d(13 - 365 * 31), 40),
+        ("c1", "Maya Okafor", "Partner", "Northstar Ventures", "Venture capital", "Toronto", 5, 4, 3, "MBA classmate", None, ["founder", "investor"], ["climate", "fintech", "running"],
+         _d(5 - 365 * 34), 12),
+        ("c2", "Daniel Reyes", "Head of Product", "Shopify", "Technology", "Ottawa", 4, 3, 2, "Met at Collision conference 2024", "c1", ["product", "operator"], ["commerce", "design"],
+         _d(13 - 365 * 31), 40),
         ("c3", "Priya Raman", "Principal", "Sequoia Capital", "Venture capital", "San Francisco", 3, 4, 4, "Intro from Maya", "c1", ["investor"], ["AI", "developer tools"], None, 75),
         ("c4", "Tom Becker", "Engagement Manager", "McKinsey & Company", "Consulting", "New York", 3, 3, 2, "Case competition judge", None, ["consultant"], ["healthcare", "squash"], None, 120),
-        ("c5", "Lena Fischer", "Founder & CEO", "Kiln Robotics", "Robotics", "Montreal", 4, 2, 1, "Worked together at my first company", None, ["founder", "startup", "engineer"], ["robotics", "climbing"], None, 20),
+        ("c5", "Lena Fischer", "Founder & CEO", "Kiln Robotics", "Robotics", "Montreal", 4, 2, 1, "Worked together at my first company", None, ["founder", "startup", "engineer"],
+         ["robotics", "climbing"], None, 20),
         ("c6", "Omar Haddad", "Portfolio Manager", "Brookfield", "Asset management", "Toronto", 3, 4, 3, "Family friend", None, ["investor", "finance"], ["infrastructure", "real estate"], None, 200),
         ("c7", "Grace Liu", "Senior Software Engineer", "NVIDIA", "Semiconductors", "Santa Clara", 2, 2, 1, "University roommate's sister", None, ["engineer"], ["AI", "chess"], None, 400),
         ("c8", "Samuel Adeyemi", "Associate", "a16z", "Venture capital", "New York", 3, 3, 3, "Podcast guest swap", "c3", ["investor", "vc"], ["crypto", "consumer"], None, 30),
         ("c9", "Isabelle Martin", "Director, Strategy", "Royal Bank of Canada", "Banking", "Toronto", 4, 3, 2, "MBA classmate", "c1", ["finance"], ["wine", "tennis"], _d(9 - 365 * 30), 15),
-        ("c10", "Jonah Weiss", "Angel investor", "Independent", "Venture capital", "New York", 2, 3, 3, "Invested in my first company", None, ["investor", "founder", "angel"], ["media", "sports"], None, 260),
+        ("c10", "Jonah Weiss", "Angel investor", "Independent", "Venture capital", "New York", 2, 3, 3, "Invested in my first company", None, ["investor", "founder", "angel"],
+         ["media", "sports"], None, 260),
         ("c11", "Aisha Karim", "Recruiter", "Citadel", "Hedge fund", "New York", 2, 3, 2, "Career fair", None, ["hire", "talent"], [], None, 50),
         ("c12", "Marco Bellini", "CFO", "Kiln Robotics", "Robotics", "Montreal", 2, 2, 1, "Via Lena", "c5", ["finance", "operator"], ["F1"], None, 90),
         ("c13", "Hannah Cho", "Product Lead", "Anthropic", "AI", "San Francisco", 3, 3, 3, "Hackathon teammate", None, ["product", "ai"], ["AI safety", "hiking"], None, 55),
         ("c14", "Ethan Moore", "Mortgage specialist", "TD Bank", "Banking", "Toronto", 2, 1, 1, "Referred by Isabelle", "c9", ["finance"], ["real estate"], None, 150),
-        ("c15", "Sofia Alvarez", "Mentor; former COO", "Wealthsimple", "Fintech", "Toronto", 5, 4, 3, "Early employee at her company", None, ["operator", "founder", "startup"], ["fintech", "cooking"], _d(21 - 365 * 45), 8),
+        ("c15", "Sofia Alvarez", "Mentor; former COO", "Wealthsimple", "Fintech", "Toronto", 5, 4, 3, "Early employee at her company", None, ["operator", "founder", "startup"],
+         ["fintech", "cooking"], _d(21 - 365 * 45), 8),
         ("c16", "Rahul Mehta", "Analyst", "Pershing Square", "Hedge fund", "New York", 2, 2, 2, "Investment club", None, ["investor", "finance"], ["value investing"], None, 310),
     ]
     ids = {}
@@ -109,7 +120,8 @@ def seed():
         notes="Focus on AI infrastructure and developer tools. Asked what I think about vertical AI in Canada.",
         commitments=[{"text": "Share list of three Canadian AI startups worth meeting", "due": _d(6), "made": _d(-10)}])
     upd("c4", connections=[{"id": ids["c11"], "verified": False}], notes="Could explain McKinsey's hiring process for experienced hires.")
-    upd("c5", connections=[{"id": ids["c12"], "verified": True}, {"id": ids["c2"], "verified": False}], notes="Building warehouse robotics. Raising a Series A in Q1. Asked me to look at her pitch deck.",
+    upd("c5", connections=[{"id": ids["c12"], "verified": True}, {"id": ids["c2"], "verified": False}],
+        notes="Building warehouse robotics. Raising a Series A in Q1. Asked me to look at her pitch deck.",
         commitments=[{"text": "Give feedback on Series A deck", "due": _d(3), "made": _d(-6)}],
         milestones=[{"title": "Kiln Robotics 5-year anniversary", "date": _d(18)}])
     upd("c6", notes="Knows infrastructure and real-assets investing inside out. Good person to understand how private markets react to higher rates.")
@@ -156,5 +168,6 @@ def seed():
     for name, cik in (("Berkshire Hathaway", 1067983), ("Pershing Square", 1336528), ("Himalaya Capital", 1709323)):
         db.create_record(S, "investor", {"name": name, "cik": cik})
     db.create_record(S, "scenario", {"name": "Rates stay elevated", "inputs": {"rates": 75, "market": -5}, "note": "Saved to revisit after the October BoC decision."})
-    db.create_record(S, "note", {"title": "Why I'm overweight Canada", "text": "Home bias is partly deliberate: CAD liabilities (future home). Revisit if the CAD falls another 5%.", "tags": ["portfolio"]})
+    db.create_record(S, "note",
+                     {"title": "Why I'm overweight Canada", "text": "Home bias is partly deliberate: CAD liabilities (future home). Revisit if the CAD falls another 5%.", "tags": ["portfolio"]})
     return True

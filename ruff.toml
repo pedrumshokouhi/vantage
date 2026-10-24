@@ -1,0 +1,12 @@
+# Lint config for the Python code: `ruff check .` (CI runs it on every push).
+target-version = "py39"
+line-length = 200
+extend-exclude = ["vendor", "data"]
+
+[lint]
+select = ["E", "F", "W", "I", "B"]
+ignore = [
+  "B007",  # unused loop variables are often kept for readability when unpacking
+  "B023",  # closures here are always called inside the loop that defines them
+  "B904",  # house style: HTTPError replaces the cause on purpose
+]

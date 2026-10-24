@@ -1,5 +1,6 @@
 """Briefing, calendar, relationships, priorities, radar, 'since last visit' and
 the retrieval layer behind the chief of staff."""
+import calendar as _cal
 import datetime as dt
 import hashlib
 import json
@@ -186,7 +187,9 @@ def analyze_story(space, s, port):
         parts["mine"] = {"label": "calculated", "items": [{"ticker": t, "tilt": sc, "weight": w} for t, sc, w in hits[:5]],
                          "text": "No holdings with a meaningful sensitivity to this development." if not hits else ""}
     else:
-        parts["matters"] = {"label": "interpretation", "text": "No known economic transmission pattern detected in this story. It may matter for reasons the built-in model does not cover; ask Claude for a deeper read."}
+        parts["matters"] = {"label": "interpretation",
+                            "text": "No known economic transmission pattern detected in this story. "
+                                    "It may matter for reasons the built-in model does not cover; ask Claude for a deeper read."}
         parts["mine"] = {"label": "calculated", "items": [], "text": "No mapped driver exposure."}
     direct = [m for m in s.get("mentions", []) if m["kind"] in ("holding", "watch", "org")]
     if direct:
@@ -219,12 +222,15 @@ def macro(space):
     if policy:
         prime = policy["value"] + 2.2
         practical.append({"label": "calculated", "title": "Borrowing: Canadian prime rate is about %.2f%%" % prime,
-                          "text": "Big-bank prime has sat 2.20 points above the BoC target rate since 2022. A $500k variable mortgage at prime minus 0.5 costs about $%s/month in interest alone." % format(round(500000 * (prime - .5) / 100 / 12), ","),
+                          "text": "Big-bank prime has sat 2.20 points above the BoC target rate since 2022. "
+                                  "A $500k variable mortgage at prime minus 0.5 costs about $%s/month in interest alone." % format(round(500000 * (prime - .5) / 100 / 12), ","),
                           "src": "Bank of Canada Valet (%s)" % policy["date"]})
     if cpi and policy:
         real = policy["value"] - cpi["value"]
         practical.append({"label": "calculated", "title": "Real policy rate: %+.2f%%" % real,
-                          "text": "Policy rate minus headline inflation. %s" % ("Positive means cash savings roughly keep pace with prices; the policy stance is restrictive." if real > 0 else "Negative means cash loses purchasing power; policy is still supportive."),
+                          "text": "Policy rate minus headline inflation. %s" % (
+                              "Positive means cash savings roughly keep pace with prices; the policy stance is restrictive." if real > 0
+                              else "Negative means cash loses purchasing power; policy is still supportive."),
                           "src": "BoC target %.2f%% (%s), CPI %.1f%% y/y (%s)" % (policy["value"], policy["date"], cpi["value"], cpi["date"])})
     if usdcad:
         practical.append({"label": "calculated", "title": "Purchasing power: US$100 costs C$%.2f" % (100 * usdcad["value"]),
@@ -245,29 +251,44 @@ def _d(s):
     return dt.date.fromisoformat(s[:10])
 
 
+def _add_months(d, n):
+    """Same day n months later, clamped to the month's last day (Jan 31 -> Feb 28 -> Mar 31, no drift)."""
+    m = d.month - 1 + n
+    y, m = d.year + m // 12, m % 12 + 1
+    return d.replace(year=y, month=m, day=min(d.day, _cal.monthrange(y, m)[1]))
+
+
 def _expand_user_event(e, start, end):
     s = e.get("start")
     if not s:
         return []
     rec = e.get("recur") or "none"
-    first = _d(s)
+    all_day = bool(e.get("all_day")) or len(s) <= 10
+    try:
+        first = _d(s)
+        st0 = None if all_day else dt.datetime.fromisoformat(s)
+    except (TypeError, ValueError):
+        return []  # one malformed event shouldn't take the whole calendar down
     out = []
     dur = None
-    if e.get("end") and not e.get("all_day"):
+    if e.get("end") and not all_day:
         try:
-            dur = dt.datetime.fromisoformat(e["end"]) - dt.datetime.fromisoformat(s)
-        except ValueError:
+            dur = dt.datetime.fromisoformat(e["end"]) - st0
+        except (TypeError, ValueError):
             dur = None
     cur = first
     for i in range(800):
+        if rec == "monthly":
+            cur = _add_months(first, i)
+        elif rec == "yearly":
+            cur = _add_months(first, 12 * i)
         if cur > end:
             break
         if cur >= start:
-            if e.get("all_day") or len(s) <= 10:
+            if all_day:
                 out.append((cur.isoformat(), None))
             else:
-                st = dt.datetime.fromisoformat(s)
-                st = st.replace(year=cur.year, month=cur.month, day=cur.day)
+                st = st0.replace(year=cur.year, month=cur.month, day=cur.day)
                 out.append((st.isoformat(), (st + dur).isoformat() if dur else None))
         if rec == "none":
             break
@@ -275,20 +296,7 @@ def _expand_user_event(e, start, end):
             cur += dt.timedelta(days=1)
         elif rec == "weekly":
             cur += dt.timedelta(days=7)
-        elif rec == "monthly":
-            m = cur.month
-            y = cur.year + (m // 12)
-            m = m % 12 + 1
-            try:
-                cur = cur.replace(year=y, month=m)
-            except ValueError:
-                cur = cur.replace(year=y, month=m, day=28)
-        elif rec == "yearly":
-            try:
-                cur = cur.replace(year=cur.year + 1)
-            except ValueError:
-                cur = cur.replace(year=cur.year + 1, day=28)
-        else:
+        elif rec not in ("monthly", "yearly"):
             break
     return out
 
@@ -433,7 +441,6 @@ def week_ahead(space):
     today = dt.date.today()
     end = today + dt.timedelta(days=7)
     evs = calendar(space, today, end)
-    contacts = {c["id"]: c for c in db.list_records(space, "contact")}
     days = []
     for i in range(8):
         d = today + dt.timedelta(days=i)
@@ -642,10 +649,10 @@ def who(space, q):
     if org:
         adj = defaultdict(list)
         for c in contacts:
-            for l in c.get("connections") or []:
-                if l.get("id") in byid:
-                    adj[c["id"]].append((l["id"], bool(l.get("verified"))))
-                    adj[l["id"]].append((c["id"], bool(l.get("verified"))))
+            for link in c.get("connections") or []:
+                if link.get("id") in byid:
+                    adj[c["id"]].append((link["id"], bool(link.get("verified"))))
+                    adj[link["id"]].append((c["id"], bool(link.get("verified"))))
         targets = {c["id"] for c in contacts if org in (c.get("org") or "").lower()}
         for c in contacts:
             if c["id"] in targets:
@@ -755,6 +762,8 @@ def draft_message(space, contact_id, purpose=""):
 # Radar
 # ---------------------------------------------------------------------------
 
+SNOOZE = 3 * DAY
+
 KIND_LABEL = {"thesis": "Thesis monitor", "price": "Price move", "exposure": "Exposure", "filing": "Filing", "relationship": "Relationship",
               "calendar": "Calendar", "decision": "Decision review", "second_look": "Second look", "investor": "Investor filings"}
 
@@ -768,8 +777,12 @@ def _alert(space, key, kind, title, body, rel, imp, urg, conf, group=None):
     ex = db.q1("SELECT id, status FROM alerts WHERE space=? AND key=?", (space, key))
     now = _now()
     if ex:
-        db.run("UPDATE alerts SET title=?, body=?, relevance=?, impact=?, urgency=?, confidence=?, score=?, updated=? WHERE id=?",
-               (title, json.dumps(body), rel, imp, urg, conf, score, now, ex["id"]))
+        # A signal that fires again comes back: a stale one at once, a snoozed one once its snooze has run out.
+        # A snoozed row keeps its `updated` (the moment it was snoozed) so the snooze can expire; dismissed stays dismissed.
+        db.run("UPDATE alerts SET title=?, body=?, relevance=?, impact=?, urgency=?, confidence=?, score=?, "
+               "status=CASE WHEN status='stale' OR (status='snoozed' AND updated<?) THEN 'open' ELSE status END, "
+               "updated=CASE WHEN status='snoozed' AND updated>=? THEN updated ELSE ? END WHERE id=?",
+               (title, json.dumps(body), rel, imp, urg, conf, score, now - SNOOZE, now - SNOOZE, now, ex["id"]))
     else:
         db.run("INSERT INTO alerts (id, space, key, kind, title, body, relevance, impact, urgency, confidence, score, created, updated, status, group_key) "
                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",

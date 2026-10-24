@@ -4,7 +4,7 @@ import datetime as dt
 import re
 import time
 
-from . import ai, db, engine, intel, kb
+from . import ai, db, engine, intel
 
 SEARCH_KINDS = ("holding", "contact", "event", "decision", "note", "watch", "plan", "scenario", "investor")
 
@@ -141,7 +141,8 @@ def answer(space, q):
         intent = "reconnect"
         mem = intel.relationship_memory(space)
         items = [_ref("contact", r["id"], r["text"]) for r in mem["reasons"] if r["kind"] == "trip"]
-        blocks.append({"type": "retrieved", "title": "People where you're going", "items": items or [_ref(None, None, "No upcoming travel events that match a contact's city. Add a travel event with a location.")]})
+        blocks.append({"type": "retrieved", "title": "People where you're going", "items": items or [
+            _ref(None, None, "No upcoming travel events that match a contact's city. Add a travel event with a location.")]})
         items = [_ref("contact", x["id"], "%s (%s): %s" % (x["name"], x.get("org") or "", ("%d days since last contact" % x["days"]) if x["days"] else "never logged")) for x in mem["lost_touch"][:6]]
         blocks.append({"type": "retrieved", "title": "Lapsed relationships", "items": items or [_ref(None, None, "Everyone is within cadence.")]})
         items = [_ref("contact", r["id"], r["text"], "fact", r.get("link")) for r in mem["reasons"] if r["kind"] == "news"][:4]

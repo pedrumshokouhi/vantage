@@ -6,17 +6,19 @@ last good value is returned with its original timestamp, or None.
 """
 import datetime as dt
 import email.utils
-import gzip
 import hashlib
 import html
+import ipaddress
 import json
 import re
+import socket
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 
 from . import db
@@ -27,16 +29,60 @@ except ImportError:  # pragma: no cover
     ZoneInfo = None
 
 BROWSER_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Vantage/1.0"
+MAX_RESPONSE = 32 * 1024 * 1024  # SEC submissions are the largest legitimate payloads, at a few MB
 
 
-def http_get(url, headers=None, timeout=15):
+class ResponseTooLarge(ValueError):
+    pass
+
+
+class BlockedURL(ValueError):
+    pass
+
+
+def check_public(url):
+    """Refuse a URL whose host resolves to a loopback, private, link-local or otherwise non-public address,
+    so a user-supplied link (a calendar subscription) can't make the server read its own LAN."""
+    u = urllib.parse.urlsplit(url)
+    if u.scheme not in ("http", "https") or not u.hostname:
+        raise BlockedURL("only http(s) links can be fetched")
+    try:
+        infos = socket.getaddrinfo(u.hostname, u.port or (443 if u.scheme == "https" else 80), proto=socket.IPPROTO_TCP)
+    except socket.gaierror as e:
+        raise BlockedURL("can't resolve %s (%s)" % (u.hostname, e.strerror))
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        if not ip.is_global or ip.is_multicast:
+            raise BlockedURL("%s points at a private or local address (%s)" % (u.hostname, ip))
+
+
+class _PublicRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        check_public(newurl)  # a redirect may not hop to a private address either
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_public_opener = urllib.request.build_opener(_PublicRedirects)
+
+
+def http_get(url, headers=None, timeout=15, limit=MAX_RESPONSE, public_only=False):
+    """GET with a hard size cap on both the wire bytes and the decompressed body, so a huge or
+    gzip-bomb response (calendar links are user-supplied) can't exhaust memory. public_only refuses
+    hosts on loopback/private networks, including after redirects."""
     h = {"User-Agent": BROWSER_UA, "Accept-Encoding": "gzip"}
     h.update(headers or {})
     req = urllib.request.Request(url, headers=h)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        raw = r.read()
+    if public_only:
+        check_public(url)
+    with (_public_opener.open if public_only else urllib.request.urlopen)(req, timeout=timeout) as r:
+        raw = r.read(limit + 1)
+        if len(raw) > limit:
+            raise ResponseTooLarge("response larger than %d MB" % (limit // 2 ** 20))
         if r.headers.get("Content-Encoding") == "gzip":
-            raw = gzip.decompress(raw)
+            d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            raw = d.decompress(raw, limit + 1)
+            if len(raw) > limit or d.unconsumed_tail:
+                raise ResponseTooLarge("decompressed response larger than %d MB" % (limit // 2 ** 20))
         return raw
 
 
@@ -69,7 +115,8 @@ FEEDS = [
 
 TOPIC_RULES = [
     ("conflict", r"\b(war|missile|strike[sd]?|airstrike|troops|invasion|ceasefire|drone attack|shelling|militants?|hostages?|military|gaza|ukraine|israel|iran|hezbollah|houthi|nato)\b"),
-    ("macro", r"\b(inflation|cpi|interest rates?|rate cut|rate hike|central bank|federal reserve|fed\b|bank of canada|gdp|unemployment|jobs report|payrolls|recession|treasury yields?|bond yields?|tariffs?|economy)\b"),
+    ("macro", r"\b(inflation|cpi|interest rates?|rate cut|rate hike|central bank|federal reserve|fed\b|bank of canada|gdp|unemployment|"
+              r"jobs report|payrolls|recession|treasury yields?|bond yields?|tariffs?|economy)\b"),
     ("markets", r"\b(stocks?|shares|s&p|nasdaq|dow|tsx|earnings|ipo|investors?|oil prices?|bitcoin|crypto|bonds?|dollar|yen|euro|gold)\b"),
     ("technology", r"\b(ai|artificial intelligence|openai|anthropic|nvidia|chips?|semiconductors?|apple|google|microsoft|meta|software|cyber|data cent(er|re)s?|robot|quantum)\b"),
     ("geopolitics", r"\b(election|president|prime minister|sanctions?|diplomat|summit|china|russia|taiwan|eu\b|parliament|minister)\b"),
@@ -159,6 +206,8 @@ def refresh_news():
         except Exception as e:  # noqa: BLE001
             db.source_err("news:" + fid, e)
             return feed, []
+        finally:
+            db.close()  # pool threads are discarded after this refresh
 
     with ThreadPoolExecutor(8) as ex:
         results = list(ex.map(one, FEEDS))
@@ -297,6 +346,7 @@ def quotes(tickers, max_age=600, force=False):
                 try:
                     _refresh_quotes(todo)
                 finally:
+                    db.close()
                     with _bg_lock:
                         _bg["running"].difference_update(todo)
             threading.Thread(target=run, daemon=True).start()
@@ -365,8 +415,6 @@ def convert(amount, ccy, base, table=None):
     if ccy == base:
         return amount
     table = table or fx_table()
-    if ccy == "GBP" and "GBP" not in table and "GBp" in table:
-        pass
     if ccy not in table or base not in table:
         return None
     return amount * table[ccy] / table[base]
@@ -639,8 +687,11 @@ def _expand(start, end, allday, rrule, lo, hi):
         return
     r = dict(p.split("=", 1) for p in rrule.split(";") if "=" in p)
     freq = r.get("FREQ", "")
-    interval = int(r.get("INTERVAL", "1") or 1)
-    count = int(r["COUNT"]) if "COUNT" in r else None
+    try:
+        interval = max(1, int(r.get("INTERVAL", "1") or 1))
+        count = int(r["COUNT"]) if "COUNT" in r else None
+    except ValueError:  # malformed rule: show the first occurrence rather than failing the whole calendar
+        interval, count, freq = 1, 1, ""
     until = None
     if "UNTIL" in r:
         try:
@@ -648,37 +699,35 @@ def _expand(start, end, allday, rrule, lo, hi):
         except ValueError:
             pass
     step = {"DAILY": dt.timedelta(days=interval), "WEEKLY": dt.timedelta(weeks=interval)}.get(freq)
-    cur, n = s0, 0
-    for _ in range(2000):
+    months = {"MONTHLY": interval, "YEARLY": 12 * interval}.get(freq)
+    if not step and not months:
+        if lo <= s0 <= hi:
+            yield fmt(s0), fmt(s0 + dur) if dur else None
+        return
+    n = 0
+    for k in range(2000):
         if count is not None and n >= count:
             break
-        if until and cur > until:
-            break
-        if cur > hi:
+        if step:
+            cur = s0 + k * step
+        else:
+            # count months from the first occurrence: a date that doesn't exist that month (the 31st, Feb 29)
+            # is skipped as RFC 5545 says, and later months keep the original day instead of drifting
+            m = s0.month - 1 + k * months
+            try:
+                cur = s0.replace(year=s0.year + m // 12, month=m % 12 + 1)
+            except ValueError:
+                continue
+        if (until and cur > until) or cur > hi:
             break
         if cur >= lo:
             yield fmt(cur), fmt(cur + dur) if dur else None
         n += 1
-        if step:
-            cur = cur + step
-        elif freq == "MONTHLY":
-            m = cur.month - 1 + interval
-            try:
-                cur = cur.replace(year=cur.year + m // 12, month=m % 12 + 1)
-            except ValueError:
-                break
-        elif freq == "YEARLY":
-            try:
-                cur = cur.replace(year=cur.year + interval)
-            except ValueError:
-                cur = cur.replace(year=cur.year + interval, day=28)
-        else:
-            break
 
 
 def fetch_ics(url):
     url = re.sub(r"^webcal://", "https://", url.strip())
-    raw = http_get(url, timeout=20).decode("utf-8", "replace")
+    raw = http_get(url, timeout=20, public_only=True).decode("utf-8", "replace")
     if "BEGIN:VCALENDAR" not in raw:
         raise ValueError("URL did not return an iCalendar file")
     return parse_ics(raw)
