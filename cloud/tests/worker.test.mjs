@@ -138,3 +138,30 @@ test("failed-login rows store a bounded username", async () => {
   await call("POST", "/api/login", { username: "x".repeat(5000), verifier: "00".repeat(32) });
   assert.ok(db.prepare("SELECT MAX(LENGTH(username)) n FROM attempts").get().n <= 64);
 });
+
+test("import validates rows, writes revisions and never overwrites", async () => {
+  await signIn();
+  const { body: keep } = await call("POST", "/api/r/note", { title: "mine" });
+  const r = await call("POST", "/api/import", { vantage_export: 2, records: [
+    { id: "not_new1", _kind: "note", _created: 1, data: { title: "imported" } },
+    { id: keep.id, _kind: "note", data: { title: "overwrite?" } },
+    { id: "bad id!", _kind: "note", data: {} }, "junk",
+    { _kind: "holding", data: { ticker: "abc", quantity: "lots" } },
+  ] });
+  assert.deepEqual(r.body, { imported: 1, skipped: 4 });
+  assert.equal((await call("GET", "/api/r/note/" + keep.id)).body.title, "mine");
+  assert.equal((await call("GET", "/api/r/note/not_new1/revisions")).body.revisions.length, 1);
+  const v1 = await call("POST", "/api/import", { vantage_export: 1, records: { note: [{ id: "not_new2", title: "from local" }] } });
+  assert.deepEqual(v1.body, { imported: 1, skipped: 0 });
+});
+
+test("stale and expired-snooze alerts reopen when they fire again", async () => {
+  await signIn();
+  const fire = () => call("POST", "/api/alerts/upsert", { alerts: [{ key: "k1", kind: "price", title: "t" }] });
+  const status = () => db.prepare("SELECT status FROM alerts WHERE key='k1'").get().status;
+  await fire();
+  db.prepare("UPDATE alerts SET status='stale'").run(); await fire(); assert.equal(status(), "open");
+  db.prepare("UPDATE alerts SET status='snoozed', updated=?").run(Date.now() / 1000 - 60); await fire(); assert.equal(status(), "snoozed");
+  db.prepare("UPDATE alerts SET updated=?").run(Date.now() / 1000 - 4 * 86400); await fire(); assert.equal(status(), "open");
+  db.prepare("UPDATE alerts SET status='dismissed'").run(); await fire(); assert.equal(status(), "dismissed");
+});

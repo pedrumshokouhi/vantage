@@ -14,6 +14,7 @@ const SETTING_KEYS = new Set(["base_currency", "interests", "objectives", "const
   "muted", "muted_kinds", "kind_weights", "home_mode", "timezones", "ask_history", "theme", "watch_countries", "alert_thresholds"]);
 const LIVE_ONLY = new Set(["anthropic_key", "anthropic_model", "sec_contact"]);
 const ITER = 600000;
+const SNOOZE = 3 * 86400;
 const IDLE = 12 * 3600, SHORT = 12 * 3600, LONGTTL = 30 * 86400;
 const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36 Vantage/2";
 const enc = new TextEncoder();
@@ -230,8 +231,12 @@ async function upsertAlert(env, space, a, origin) {
   const t = now();
   const ex = await q1(env, "SELECT id, status FROM alerts WHERE space=? AND key=?", space, a.key);
   if (ex) {
-    await run(env, "UPDATE alerts SET title=?, body=?, relevance=?, impact=?, urgency=?, confidence=?, score=?, updated=? WHERE id=?",
-      a.title, JSON.stringify(a.body || {}), rel, imp, urg, conf, score, t, ex.id);
+    // A signal that fires again comes back: a stale one at once, a snoozed one once its snooze has run out.
+    // A snoozed row keeps its `updated` (the moment it was snoozed) so the snooze can expire; dismissed stays dismissed.
+    await run(env, "UPDATE alerts SET title=?, body=?, relevance=?, impact=?, urgency=?, confidence=?, score=?, " +
+      "status=CASE WHEN status='stale' OR (status='snoozed' AND updated<?) THEN 'open' ELSE status END, " +
+      "updated=CASE WHEN status='snoozed' AND updated>=? THEN updated ELSE ? END WHERE id=?",
+      a.title, JSON.stringify(a.body || {}), rel, imp, urg, conf, score, t - SNOOZE, t - SNOOZE, t, ex.id);
   } else {
     await run(env, "INSERT INTO alerts (id, space, key, kind, title, body, relevance, impact, urgency, confidence, score, created, updated, status, group_key, origin) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
       id, space, a.key, a.kind, a.title, JSON.stringify(a.body || {}), rel, imp, urg, conf, score, t, t, "open", a.group_key || a.key, origin || "app");
@@ -1042,15 +1047,37 @@ route("GET", "/api/export", async (c) => {
 route("POST", "/api/import", async (c) => {
   const d = await c.body();
   if (![1, 2].includes(d.vantage_export)) throw new HttpError(400, "Not a Vantage export file");
-  let n = 0; const stmts = [];
-  for (const it of d.records || []) {
-    const kind = it._kind || it.kind; const data = it.data || clean(it);
-    if (!KINDS.has(kind)) continue;
-    stmts.push(c.env.DB.prepare("INSERT OR IGNORE INTO records VALUES (?,?,?,?,?,?,0)").bind(it.id || kind.slice(0, 3) + "_" + hash53(JSON.stringify(data)), c.space, kind, JSON.stringify(clean(data)), it._created || now(), now()));
+  // v2 exports are a list of rows; v1 (the local edition) maps each kind to a list
+  let rows = d.records || [];
+  if (!Array.isArray(rows) && typeof rows === "object") rows = Object.entries(rows).flatMap(([kind, list]) => (Array.isArray(list) ? list : []).map((x) => x && typeof x === "object" ? Object.assign({ _kind: kind }, x) : x));
+  if (!Array.isArray(rows)) throw new HttpError(400, "records must be a list");
+  const items = [];
+  let skipped = 0;
+  for (const it of rows.slice(0, 20000)) {
+    const kind = it && (it._kind || it.kind);
+    if (!it || typeof it !== "object" || !KINDS.has(kind) || (it.id != null && !/^[\w-]{1,64}$/.test(String(it.id)))) { skipped++; continue; }
+    let data;
+    try { data = clean(sanitize(kind, Object.assign({}, it.data || clean(it)))); } catch (e) { if (e instanceof HttpError) { skipped++; continue; } throw e; }
+    const id = it.id ? String(it.id) : kind.slice(0, 3) + "_" + hash53(JSON.stringify(data));
+    items.push({ id, kind, body: JSON.stringify(data), created: +it._created || now() });
+  }
+  // ids that already exist (in any space: ids are global) are left alone, never overwritten
+  const taken = new Set();
+  for (let i = 0; i < items.length; i += 90) {
+    const part = items.slice(i, i + 90).map((x) => x.id);
+    for (const r of await q(c.env, `SELECT id FROM records WHERE id IN (${part.map(() => "?").join(",")})`, ...part)) taken.add(r.id);
+  }
+  const stmts = [];
+  let n = 0;
+  for (const x of items) {
+    if (taken.has(x.id)) { skipped++; continue; }
+    taken.add(x.id);
+    stmts.push(c.env.DB.prepare("INSERT INTO records VALUES (?,?,?,?,?,?,0)").bind(x.id, c.space, x.kind, x.body, x.created, now()));
+    stmts.push(c.env.DB.prepare("INSERT INTO revisions (record_id, ts, action, data) VALUES (?,?,?,?)").bind(x.id, x.created, "create", x.body));
     n++;
   }
   for (let i = 0; i < stmts.length; i += 50) await c.env.DB.batch(stmts.slice(i, i + 50));
-  return { imported: n };
+  return { imported: n, skipped };
 });
 route("POST", "/api/demo/reset", async (c) => {
   await c.env.DB.batch([c.env.DB.prepare("DELETE FROM records WHERE space='demo'"), c.env.DB.prepare("DELETE FROM settings WHERE space='demo'"), c.env.DB.prepare("DELETE FROM alerts WHERE space='demo'"), c.env.DB.prepare("DELETE FROM snapshots WHERE space='demo'")]);

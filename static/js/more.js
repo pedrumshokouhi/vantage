@@ -338,7 +338,7 @@
         <div class="list mt12">${st.backups.map((b) => `<div class="item small"><span class="mono grow">${esc(b.file)}</span><span class="muted">${(b.size / 1024).toFixed(0)} KB · ${V.ago(b.ts)}</span></div>`).join("") || '<div class="small muted">No backups yet.</div>'}</div>
         ${V.state.space === "demo" ? `<hr class="divider"><button class="btn danger" id="rsDemo">Reset demo workspace</button>` : ""}</div></div>`;
     $("#bk").onclick = async () => { await V.try(() => V.post("/api/backup"), "Backup written"); V.render(); };
-    $("#impJ").onchange = async (e) => { const f = e.target.files[0]; if (!f) return; const j = JSON.parse(await f.text()); const r = await V.try(() => V.post("/api/import", j)); V.toast(`Imported ${r.imported} records (a backup was taken first)`, "ok"); };
+    $("#impJ").onchange = async (e) => { const f = e.target.files[0]; if (!f) return; const j = JSON.parse(await f.text()); const r = await V.try(() => V.post("/api/import", j)); V.toast(`Imported ${r.imported} records` + (r.skipped ? `, skipped ${r.skipped} (already present or invalid)` : "") + " (a backup was taken first)", "ok"); };
     const rd = $("#rsDemo"); if (rd) rd.onclick = async () => { if (await V.confirm("Reset the demo workspace to its original sample data?", "Reset")) { await V.post("/api/demo/reset"); V.toast("Demo reset", "ok"); } };
   }
 

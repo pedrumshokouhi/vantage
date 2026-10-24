@@ -8,8 +8,10 @@ import datetime as dt
 import email.utils
 import hashlib
 import html
+import ipaddress
 import json
 import re
+import socket
 import threading
 import time
 import urllib.error
@@ -34,13 +36,45 @@ class ResponseTooLarge(ValueError):
     pass
 
 
-def http_get(url, headers=None, timeout=15, limit=MAX_RESPONSE):
+class BlockedURL(ValueError):
+    pass
+
+
+def check_public(url):
+    """Refuse a URL whose host resolves to a loopback, private, link-local or otherwise non-public address,
+    so a user-supplied link (a calendar subscription) can't make the server read its own LAN."""
+    u = urllib.parse.urlsplit(url)
+    if u.scheme not in ("http", "https") or not u.hostname:
+        raise BlockedURL("only http(s) links can be fetched")
+    try:
+        infos = socket.getaddrinfo(u.hostname, u.port or (443 if u.scheme == "https" else 80), proto=socket.IPPROTO_TCP)
+    except socket.gaierror as e:
+        raise BlockedURL("can't resolve %s (%s)" % (u.hostname, e.strerror))
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        if not ip.is_global or ip.is_multicast:
+            raise BlockedURL("%s points at a private or local address (%s)" % (u.hostname, ip))
+
+
+class _PublicRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        check_public(newurl)  # a redirect may not hop to a private address either
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_public_opener = urllib.request.build_opener(_PublicRedirects)
+
+
+def http_get(url, headers=None, timeout=15, limit=MAX_RESPONSE, public_only=False):
     """GET with a hard size cap on both the wire bytes and the decompressed body, so a huge or
-    gzip-bomb response (calendar links are user-supplied) can't exhaust memory."""
+    gzip-bomb response (calendar links are user-supplied) can't exhaust memory. public_only refuses
+    hosts on loopback/private networks, including after redirects."""
     h = {"User-Agent": BROWSER_UA, "Accept-Encoding": "gzip"}
     h.update(headers or {})
     req = urllib.request.Request(url, headers=h)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    if public_only:
+        check_public(url)
+    with (_public_opener.open if public_only else urllib.request.urlopen)(req, timeout=timeout) as r:
         raw = r.read(limit + 1)
         if len(raw) > limit:
             raise ResponseTooLarge("response larger than %d MB" % (limit // 2 ** 20))
@@ -692,7 +726,7 @@ def _expand(start, end, allday, rrule, lo, hi):
 
 def fetch_ics(url):
     url = re.sub(r"^webcal://", "https://", url.strip())
-    raw = http_get(url, timeout=20).decode("utf-8", "replace")
+    raw = http_get(url, timeout=20, public_only=True).decode("utf-8", "replace")
     if "BEGIN:VCALENDAR" not in raw:
         raise ValueError("URL did not return an iCalendar file")
     return parse_ics(raw)

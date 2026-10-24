@@ -366,7 +366,7 @@
         <div>Heavy market series are cached in your browser (IndexedDB) so pages load fast; clearing site data just re-downloads them.</div>
         <div><button class="btn sm" id="clrCache">Clear this device's cache</button></div></div>
         ${V.state.space === "demo" ? `<hr class="divider"><button class="btn danger" id="rsDemo">Reset demo workspace</button>` : ""}</div></div>`;
-    $("#impJ").onchange = async (e) => { const f = e.target.files[0]; if (!f) return; const j = JSON.parse(await f.text()); const r = await V.try(() => V.net("/api/import", { body: j })); V.toast(`Imported ${r.imported} records`, "ok"); await V.store.boot(true); };
+    $("#impJ").onchange = async (e) => { const f = e.target.files[0]; if (!f) return; const j = JSON.parse(await f.text()); const r = await V.try(() => V.net("/api/import", { body: j })); V.toast(`Imported ${r.imported} records` + (r.skipped ? ` (${r.skipped} skipped: already present or invalid)` : ""), "ok"); await V.store.boot(true); };
     $("#clrCache").onclick = async () => { await V.store.idb.clear(); V.toast("Cache cleared; reloading", "ok"); setTimeout(() => location.reload(), 600); };
     const rd = $("#rsDemo"); if (rd) rd.onclick = async () => { if (await V.confirm("Reset the demo workspace to its sample data?", "Reset")) { await V.net("/api/demo/reset", { body: {} }); await V.store.boot(true); V.toast("Demo reset", "ok"); V.render(); } };
   }

@@ -168,7 +168,8 @@ class Handler(BaseHTTPRequestHandler):
                         raise HTTPError(401, "Not signed in")
                     self.sess = s
                     self.space = s["space"]
-                result = fn(self, *mt.groups())
+                with engine.request_scope():
+                    result = fn(self, *mt.groups())
                 if isinstance(result, tuple):
                     return self.send(result[0], result[1], extra=result[2] if len(result) > 2 else None)
                 return self.send(200, result if result is not None else {"ok": True})

@@ -757,6 +757,8 @@ def draft_message(space, contact_id, purpose=""):
 # Radar
 # ---------------------------------------------------------------------------
 
+SNOOZE = 3 * DAY
+
 KIND_LABEL = {"thesis": "Thesis monitor", "price": "Price move", "exposure": "Exposure", "filing": "Filing", "relationship": "Relationship",
               "calendar": "Calendar", "decision": "Decision review", "second_look": "Second look", "investor": "Investor filings"}
 
@@ -770,8 +772,12 @@ def _alert(space, key, kind, title, body, rel, imp, urg, conf, group=None):
     ex = db.q1("SELECT id, status FROM alerts WHERE space=? AND key=?", (space, key))
     now = _now()
     if ex:
-        db.run("UPDATE alerts SET title=?, body=?, relevance=?, impact=?, urgency=?, confidence=?, score=?, updated=? WHERE id=?",
-               (title, json.dumps(body), rel, imp, urg, conf, score, now, ex["id"]))
+        # A signal that fires again comes back: a stale one at once, a snoozed one once its snooze has run out.
+        # A snoozed row keeps its `updated` (the moment it was snoozed) so the snooze can expire; dismissed stays dismissed.
+        db.run("UPDATE alerts SET title=?, body=?, relevance=?, impact=?, urgency=?, confidence=?, score=?, "
+               "status=CASE WHEN status='stale' OR (status='snoozed' AND updated<?) THEN 'open' ELSE status END, "
+               "updated=CASE WHEN status='snoozed' AND updated>=? THEN updated ELSE ? END WHERE id=?",
+               (title, json.dumps(body), rel, imp, urg, conf, score, now - SNOOZE, now - SNOOZE, now, ex["id"]))
     else:
         db.run("INSERT INTO alerts (id, space, key, kind, title, body, relevance, impact, urgency, confidence, score, created, updated, status, group_key) "
                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",

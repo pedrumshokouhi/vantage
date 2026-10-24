@@ -24,7 +24,7 @@ DATA = tempfile.mkdtemp(prefix="vantage-test-")
 os.environ["VANTAGE_DATA"] = DATA
 sys.path.insert(0, ROOT)
 
-from core import auth, db, feeds, intel, server  # noqa: E402
+from core import auth, db, engine, feeds, intel, server  # noqa: E402
 
 
 _urlopen = feeds.urllib.request.urlopen
@@ -174,6 +174,67 @@ class CalendarTests(unittest.TestCase):
 
     def test_malformed_user_event_is_skipped(self):
         self.assertEqual(intel._expand_user_event({"start": "not a date"}, dt.date(2026, 1, 1), dt.date(2026, 2, 1)), [])
+
+
+class UrlGuardTests(unittest.TestCase):
+    def test_private_and_local_hosts_are_refused(self):
+        for url in ("https://127.0.0.1/cal.ics", "https://localhost/cal.ics", "https://10.1.2.3/x", "https://192.168.1.1/x",
+                    "https://169.254.169.254/latest", "https://[::1]/x", "ftp://example.com/x"):
+            with self.assertRaises(feeds.BlockedURL, msg=url):
+                feeds.check_public(url)
+
+    def test_public_ip_is_allowed(self):
+        feeds.check_public("https://8.8.8.8/cal.ics")
+
+    def test_fetch_ics_never_reaches_a_private_host(self):
+        with self.assertRaises(feeds.BlockedURL):
+            feeds.fetch_ics("webcal://127.0.0.1:1/cal.ics")
+
+
+class AlertTests(unittest.TestCase):
+    def setUp(self):
+        reset_db()
+
+    def fire(self):
+        intel._alert("live", "k1", "price", "t", {}, .5, .5, .5, .5)
+        return db.q1("SELECT status, updated FROM alerts WHERE key='k1'")
+
+    def test_stale_alert_reopens_when_it_fires_again(self):
+        self.fire()
+        db.run("UPDATE alerts SET status='stale'")
+        self.assertEqual(self.fire()["status"], "open")
+
+    def test_snooze_holds_then_expires(self):
+        self.fire()
+        db.run("UPDATE alerts SET status='snoozed', updated=?", (time.time() - 60,))
+        self.assertEqual(self.fire()["status"], "snoozed", "still snoozed within the window")
+        db.run("UPDATE alerts SET updated=?", (time.time() - intel.SNOOZE - 60,))
+        self.assertEqual(self.fire()["status"], "open")
+
+    def test_dismissed_stays_dismissed(self):
+        self.fire()
+        db.run("UPDATE alerts SET status='dismissed'")
+        self.assertEqual(self.fire()["status"], "dismissed")
+
+
+class PortfolioScopeTests(unittest.TestCase):
+    def setUp(self):
+        reset_db()
+
+    def test_portfolio_is_built_once_per_request(self):
+        calls = []
+        real = engine._portfolio
+        engine._portfolio = lambda space, force=False: calls.append(space) or {"space": space}
+        try:
+            with engine.request_scope():
+                engine.portfolio("live")
+                engine.portfolio("live")
+                engine.portfolio("demo")
+                engine.portfolio("live", force=True)
+            engine.portfolio("live")
+        finally:
+            engine._portfolio = real
+        self.assertEqual(calls, ["live", "demo", "live", "live"])
 
 
 class _Bomb(BaseHTTPRequestHandler):
