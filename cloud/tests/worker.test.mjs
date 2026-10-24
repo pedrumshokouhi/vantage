@@ -99,7 +99,11 @@ test("a decision's original reasoning is locked after 24 hours", async () => {
 test("bulk import creates and updates holdings", async () => {
   await signIn();
   const { body: h } = await call("POST", "/api/r/holding", { ticker: "abc", quantity: 1 });
-  const r = await call("POST", "/api/bulk", { items: [{ kind: "holding", id: h.id, data: { ticker: "ABC", quantity: "2" } }, { kind: "holding", data: { ticker: "xyz", quantity: 3 } }, { kind: "holding", id: "hol_missing", data: { ticker: "Q" } }] });
+  const r = await call("POST", "/api/bulk", { items: [
+    { kind: "holding", id: h.id, data: { ticker: "ABC", quantity: "2" } },
+    { kind: "holding", data: { ticker: "xyz", quantity: 3 } },
+    { kind: "holding", id: "hol_missing", data: { ticker: "Q" } },
+  ] });
   assert.equal(r.body.written, 2);
   const items = (await call("GET", "/api/r/holding")).body.items.map((x) => [x.data.ticker, x.data.quantity]).sort();
   assert.deepEqual(items, [["ABC", 2], ["XYZ", 3]]);

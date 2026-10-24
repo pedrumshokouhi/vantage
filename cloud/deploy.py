@@ -118,7 +118,7 @@ def upload_assets(script):
 
 
 def put_worker(script, db_id, assets_jwt):
-    modules = ["worker.js", "sources.js", "demo.js"]
+    modules = sorted(p.relative_to(ROOT / "worker").as_posix() for p in (ROOT / "worker").rglob("*.js"))
     metadata = {
         "main_module": "worker.js", "compatibility_date": "2026-09-01",
         "bindings": [{"name": "ASSETS", "type": "assets"}, {"name": "DB", "type": "d1", "id": db_id}],
@@ -145,7 +145,8 @@ def main():
     db = ensure_db(a.name)
     if a.status:
         for r in d1(db, "SELECT name, last_run, last_ok, last_error, runs, note FROM jobs ORDER BY name")[0]["results"]:
-            print("%-22s runs=%-4s ok=%s err=%s  %s" % (r["name"], r["runs"], time.strftime("%H:%M", time.localtime(r["last_ok"])) if r["last_ok"] else "-", (r["last_error"] or "")[:60], r["note"] or ""))
+            print("%-22s runs=%-4s ok=%s err=%s  %s" % (r["name"], r["runs"], time.strftime("%H:%M", time.localtime(r["last_ok"])) if r["last_ok"] else "-", (r["last_error"] or "")[:60],
+                                                        r["note"] or ""))
         users = d1(db, "SELECT COUNT(*) n FROM users")[0]["results"][0]["n"]
         print("users:", users, "· records:", d1(db, "SELECT space, kind, COUNT(*) n FROM records WHERE deleted=0 GROUP BY space, kind")[0]["results"])
         return
