@@ -42,7 +42,10 @@ def reset_db():
     db.close()
     for f in os.listdir(DATA):
         p = os.path.join(DATA, f)
-        shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
+        try:
+            shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
+        except FileNotFoundError:
+            pass  # a -wal/-shm file SQLite removed itself when a request thread closed its connection
     db.init()
 
 
